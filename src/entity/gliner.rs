@@ -196,9 +196,8 @@ impl GlinerModel {
             (vec![1i64, num_spans as i64, 2i64], span_idx_data)
         ).context("Failed to create span_idx")?;
 
-        let span_mask_u8: Vec<u8> = span_mask_data.iter().map(|&b| b as u8).collect();
         let span_mask = Tensor::from_array(
-            (vec![1i64, num_spans as i64], span_mask_u8)
+            (vec![1i64, num_spans as i64], span_mask_data)
         ).context("Failed to create span_mask")?;
 
         // 5. Run inference

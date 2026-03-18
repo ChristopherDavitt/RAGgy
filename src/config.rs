@@ -48,7 +48,7 @@ impl Default for NerConfig {
     fn default() -> Self {
         NerConfig {
             enabled: true,
-            model: "gliner-small-v2.5".to_string(),
+            model: "gliner-small-v2.1".to_string(),
             labels: vec![
                 "person".to_string(),
                 "organization".to_string(),

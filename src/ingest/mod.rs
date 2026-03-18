@@ -36,6 +36,45 @@ pub enum ProgressEvent {
     Committing,
 }
 
+/// A document from any source, ready for ingestion.
+/// This is the boundary between "where content comes from" and "how it's processed."
+pub struct DocumentInput {
+    /// Unique identifier for this document (filesystem path, URL, upload ID, etc.)
+    pub doc_id: String,
+    /// Human-readable name (filename, title, etc.)
+    pub name: String,
+    /// Raw content as string
+    pub content: String,
+    /// Content type determines which extractor to use
+    pub content_type: ContentType,
+    /// Content hash for change detection (skip if unchanged)
+    pub content_hash: String,
+    /// File size in bytes
+    pub size: u64,
+    /// Last modified timestamp (RFC3339)
+    pub modified: String,
+}
+
+impl DocumentInput {
+    /// Create a DocumentInput from raw content, auto-computing hash.
+    pub fn new(doc_id: String, name: String, content: String, content_type: ContentType, size: u64, modified: String) -> Self {
+        let content_hash = compute_hash(content.as_bytes());
+        DocumentInput { doc_id, name, content, content_type, content_hash, size, modified }
+    }
+
+    /// Create from in-memory bytes (e.g. HTTP upload, S3 object).
+    pub fn from_bytes(doc_id: String, name: String, bytes: &[u8], content_type: ContentType, modified: Option<String>) -> Self {
+        let content_hash = compute_hash(bytes);
+        let content = String::from_utf8_lossy(bytes).to_string();
+        let size = bytes.len() as u64;
+        let modified = modified.unwrap_or_else(|| Utc::now().to_rfc3339());
+        DocumentInput { doc_id, name, content, content_type, content_hash, size, modified }
+    }
+}
+
+// ── Filesystem source ──
+
+/// Walk local directories and ingest files. This is the filesystem-specific entry point.
 pub fn ingest_paths(
     paths: &[PathBuf],
     exclude: &[String],
@@ -48,6 +87,7 @@ pub fn ingest_paths(
     ingest_paths_with_progress(paths, exclude, store, fulltext, vector, ner, config, None)
 }
 
+/// Walk local directories with progress reporting.
 pub fn ingest_paths_with_progress(
     paths: &[PathBuf],
     exclude: &[String],
@@ -93,233 +133,56 @@ pub fn ingest_paths_with_progress(
                 None => continue,
             };
 
-            // Compute hash
-            let contents = match std::fs::read(file_path) {
+            // Read file and build DocumentInput
+            let bytes = match std::fs::read(file_path) {
                 Ok(c) => c,
                 Err(_) => {
                     result.files_failed += 1;
                     continue;
                 }
             };
-            let hash = compute_hash(&contents);
 
-            let path_str = file_path.to_string_lossy().to_string();
-
-            // Check if unchanged
-            if let Ok(Some(existing_hash)) = store.get_document_hash(&path_str) {
-                if existing_hash == hash {
-                    result.files_skipped += 1;
-                    if let Some(ref mut cb) = progress {
-                        cb(ProgressEvent::FileSkipped { path: path_str.clone() });
-                    }
-                    continue;
-                }
-                // Changed — delete old entries
-                store.delete_by_path(&path_str)?;
-                fulltext.delete_by_path(&path_str)?;
-                if let Some(v) = vector.as_deref_mut() {
-                    v.delete_by_path(&path_str);
-                }
-            }
-
-            // Extract nodes and edges
-            let text_content = String::from_utf8_lossy(&contents).to_string();
-            let extract_result = match &content_type {
-                ContentType::Markdown => markdown::extract(file_path, &text_content, &mut next_id),
-                ContentType::PlainText => plaintext::extract(file_path, &text_content, &mut next_id),
-                ContentType::Code { language } => code::extract(file_path, &text_content, language, &mut next_id),
-                ContentType::Json | ContentType::Yaml | ContentType::Toml => {
-                    structured::extract(file_path, &text_content, &content_type, &mut next_id)
-                }
-            };
-
-            let (nodes, edges) = match extract_result {
-                Ok(r) => r,
-                Err(e) => {
+            let metadata = match std::fs::metadata(file_path) {
+                Ok(m) => m,
+                Err(_) => {
                     result.files_failed += 1;
-                    if let Some(ref mut cb) = progress {
-                        cb(ProgressEvent::FileFailed { path: path_str.clone(), error: e.to_string() });
-                    }
                     continue;
                 }
             };
 
-            let file_num = result.files_indexed + result.files_skipped + result.files_failed + 1;
-            if let Some(ref mut cb) = progress {
-                cb(ProgressEvent::FileStart { path: path_str.clone(), file_num });
-            }
-
-            // Count chunks for progress
-            let total_chunks_in_file = nodes.iter()
-                .filter(|n| n.kind == NodeKind::Chunk && n.properties.text.as_ref().map_or(false, |t| !t.is_empty()))
-                .count() as u64;
-            let mut file_embeddings = 0u64;
-
-            // Collect chunks for batch embedding
-            let mut embed_batch: Vec<(u64, String, String)> = Vec::new();
-
-            // Store nodes and edges
-            for node in &nodes {
-                store.insert_node(node)?;
-
-                // Index text content in Tantivy
-                if let Some(text) = &node.properties.text {
-                    if !text.is_empty() {
-                        fulltext.add_document(
-                            node.id,
-                            &path_str,
-                            text,
-                            node.properties.title.as_deref().unwrap_or(&node.name),
-                            &content_type.as_str(),
-                        )?;
-                    }
-                }
-
-                // Collect chunk text for batch embedding
-                if vector.is_some() {
-                    if let Some(text) = &node.properties.text {
-                        if !text.is_empty() && node.kind == NodeKind::Chunk {
-                            embed_batch.push((node.id, path_str.clone(), text.clone()));
-                        }
-                    }
-                }
-
-                // Also index document titles
-                if node.kind == NodeKind::Document {
-                    if let Some(title) = &node.properties.title {
-                        fulltext.add_document(
-                            node.id,
-                            &path_str,
-                            title,
-                            title,
-                            &content_type.as_str(),
-                        )?;
-                    }
-                }
-            }
-
-            // Batch embed all chunks for this file at once
-            if let Some(v) = vector.as_deref_mut() {
-                if !embed_batch.is_empty() {
-                    if let Some(ref mut cb) = progress {
-                        cb(ProgressEvent::EmbeddingChunk {
-                            chunk_num: 0,
-                            total_in_file: embed_batch.len() as u64,
-                        });
-                    }
-                    match v.add_batch(&embed_batch) {
-                        Ok(n) => { file_embeddings = n as u64; }
-                        Err(e) => {
-                            eprintln!("\nWarning: batch embedding failed: {}", e);
-                        }
-                    }
-                }
-            }
-
-            for edge in &edges {
-                store.insert_edge(edge)?;
-            }
-
-            // Run entity extraction on chunk nodes
-            let mut entity_nodes = Vec::new();
-            let mut entity_edges = Vec::new();
-            for node in &nodes {
-                if node.kind == NodeKind::Chunk {
-                    if let Some(text) = &node.properties.text {
-                        let (mut enodes, mut eedges) = entity::regex::extract_entities(
-                            text, node.id, store, &mut next_id,
-                        )?;
-                        entity_nodes.append(&mut enodes);
-                        entity_edges.append(&mut eedges);
-                    }
-                }
-            }
-
-            for node in &entity_nodes {
-                store.insert_node(node)?;
-            }
-            for edge in &entity_edges {
-                store.insert_edge(edge)?;
-            }
-
-            // Build co-occurrence edges
-            entity::regex::build_cooccurrence_edges(store, &nodes)?;
-
-            // Run GLiNER NER if available
-            if let Some(ref mut gliner) = ner {
-                let ner_labels = &config.ner.labels;
-                let ner_threshold = config.ner.threshold;
-                let mut chunk_entity_ids: Vec<Vec<i64>> = Vec::new();
-
-                for node in &nodes {
-                    if node.kind == NodeKind::Chunk {
-                        if let Some(text) = &node.properties.text {
-                            if !text.is_empty() {
-                                match gliner.extract(text, ner_labels, ner_threshold) {
-                                    Ok(entities) => {
-                                        let mut ids_in_chunk = Vec::new();
-                                        for ent in &entities {
-                                            let entity_id = store.upsert_ner_entity(&ent.text, &ent.label)?;
-                                            store.insert_ner_mention(
-                                                entity_id,
-                                                node.id,
-                                                &path_str,
-                                                ent.score,
-                                                ent.start,
-                                                ent.end,
-                                            )?;
-                                            ids_in_chunk.push(entity_id);
-                                        }
-                                        chunk_entity_ids.push(ids_in_chunk);
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Warning: NER failed on chunk: {}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Build NER co-occurrence edges (entities in same chunk)
-                for ids in &chunk_entity_ids {
-                    for i in 0..ids.len() {
-                        for j in (i + 1)..ids.len() {
-                            if ids[i] != ids[j] {
-                                store.upsert_ner_edge(ids[i], ids[j])?;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Store document metadata
-            let metadata = std::fs::metadata(file_path)?;
             let modified = metadata.modified()
                 .map(|t| chrono::DateTime::<Utc>::from(t))
-                .unwrap_or_else(|_| Utc::now());
+                .unwrap_or_else(|_| Utc::now())
+                .to_rfc3339();
 
-            let doc_node_id = nodes.first().map(|n| n.id).unwrap_or(0);
-            store.insert_document(
-                doc_node_id,
-                &path_str,
-                &content_type.as_str(),
-                nodes.first().and_then(|n| n.properties.title.as_deref()),
-                &modified.to_rfc3339(),
-                metadata.len(),
-                &hash,
-                &Utc::now().to_rfc3339(),
+            let path_str = file_path.to_string_lossy().to_string();
+            let name = file_path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            let doc = DocumentInput::from_bytes(
+                path_str, name, &bytes, content_type, Some(modified),
+            );
+
+            // Delegate to the source-agnostic processor
+            let doc_result = ingest_document(
+                &doc, store, fulltext, vector.as_deref_mut(), ner.as_deref_mut(),
+                config, &mut next_id, &mut progress,
+                result.files_indexed + result.files_skipped + result.files_failed + 1,
             )?;
 
-            result.files_indexed += 1;
-            result.chunks_embedded += file_embeddings;
-
-            if let Some(ref mut cb) = progress {
-                cb(ProgressEvent::FileComplete {
-                    path: path_str.clone(),
-                    chunks: total_chunks_in_file,
-                    embeddings: file_embeddings,
-                });
+            match doc_result {
+                DocOutcome::Indexed { chunks_embedded } => {
+                    result.files_indexed += 1;
+                    result.chunks_embedded += chunks_embedded;
+                }
+                DocOutcome::Skipped => {
+                    result.files_skipped += 1;
+                }
+                DocOutcome::Failed => {
+                    result.files_failed += 1;
+                }
             }
         }
     }
@@ -333,6 +196,293 @@ pub fn ingest_paths_with_progress(
     }
     Ok(result)
 }
+
+// ── Source-agnostic document processing ──
+
+enum DocOutcome {
+    Indexed { chunks_embedded: u64 },
+    Skipped,
+    Failed,
+}
+
+/// Process a single document from any source. This is the core ingestion logic
+/// that knows nothing about where the content came from.
+fn ingest_document(
+    doc: &DocumentInput,
+    store: &GraphStore,
+    fulltext: &FulltextIndex,
+    mut vector: Option<&mut VectorIndex>,
+    mut ner: Option<&mut GlinerModel>,
+    config: &Config,
+    next_id: &mut u64,
+    progress: &mut Option<ProgressFn>,
+    file_num: u64,
+) -> Result<DocOutcome> {
+    // Check if unchanged
+    if let Ok(Some(existing_hash)) = store.get_document_hash(&doc.doc_id) {
+        if existing_hash == doc.content_hash {
+            if let Some(ref mut cb) = progress {
+                cb(ProgressEvent::FileSkipped { path: doc.doc_id.clone() });
+            }
+            return Ok(DocOutcome::Skipped);
+        }
+        // Changed — delete old entries
+        store.delete_by_path(&doc.doc_id)?;
+        fulltext.delete_by_path(&doc.doc_id)?;
+        if let Some(v) = vector.as_deref_mut() {
+            v.delete_by_path(&doc.doc_id);
+        }
+    }
+
+    // Use a synthetic Path for extractors (they only use it for naming)
+    let synthetic_path = PathBuf::from(&doc.doc_id);
+
+    // Extract nodes and edges
+    let extract_result = match &doc.content_type {
+        ContentType::Markdown => markdown::extract(&synthetic_path, &doc.content, next_id),
+        ContentType::PlainText => plaintext::extract(&synthetic_path, &doc.content, next_id),
+        ContentType::Code { language } => code::extract(&synthetic_path, &doc.content, language, next_id),
+        ContentType::Json | ContentType::Yaml | ContentType::Toml => {
+            structured::extract(&synthetic_path, &doc.content, &doc.content_type, next_id)
+        }
+    };
+
+    let (nodes, edges) = match extract_result {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(ref mut cb) = progress {
+                cb(ProgressEvent::FileFailed { path: doc.doc_id.clone(), error: e.to_string() });
+            }
+            return Ok(DocOutcome::Failed);
+        }
+    };
+
+    if let Some(ref mut cb) = progress {
+        cb(ProgressEvent::FileStart { path: doc.doc_id.clone(), file_num });
+    }
+
+    // Count chunks for progress
+    let total_chunks_in_file = nodes.iter()
+        .filter(|n| n.kind == NodeKind::Chunk && n.properties.text.as_ref().map_or(false, |t| !t.is_empty()))
+        .count() as u64;
+    let mut file_embeddings = 0u64;
+
+    // Collect chunks for batch embedding
+    let mut embed_batch: Vec<(u64, String, String)> = Vec::new();
+
+    // Store nodes and edges
+    for node in &nodes {
+        store.insert_node(node)?;
+
+        // Index text content in Tantivy
+        if let Some(text) = &node.properties.text {
+            if !text.is_empty() {
+                fulltext.add_document(
+                    node.id,
+                    &doc.doc_id,
+                    text,
+                    node.properties.title.as_deref().unwrap_or(&node.name),
+                    &doc.content_type.as_str(),
+                )?;
+            }
+        }
+
+        // Collect chunk text for batch embedding
+        if vector.is_some() {
+            if let Some(text) = &node.properties.text {
+                if !text.is_empty() && node.kind == NodeKind::Chunk {
+                    embed_batch.push((node.id, doc.doc_id.clone(), text.clone()));
+                }
+            }
+        }
+
+        // Also index document titles
+        if node.kind == NodeKind::Document {
+            if let Some(title) = &node.properties.title {
+                fulltext.add_document(
+                    node.id,
+                    &doc.doc_id,
+                    title,
+                    title,
+                    &doc.content_type.as_str(),
+                )?;
+            }
+        }
+    }
+
+    // Batch embed all chunks for this file at once
+    if let Some(v) = vector.as_deref_mut() {
+        if !embed_batch.is_empty() {
+            if let Some(ref mut cb) = progress {
+                cb(ProgressEvent::EmbeddingChunk {
+                    chunk_num: 0,
+                    total_in_file: embed_batch.len() as u64,
+                });
+            }
+            match v.add_batch(&embed_batch) {
+                Ok(n) => { file_embeddings = n as u64; }
+                Err(e) => {
+                    eprintln!("\nWarning: batch embedding failed: {}", e);
+                }
+            }
+        }
+    }
+
+    for edge in &edges {
+        store.insert_edge(edge)?;
+    }
+
+    // Run entity extraction on chunk nodes
+    let mut entity_nodes = Vec::new();
+    let mut entity_edges = Vec::new();
+    for node in &nodes {
+        if node.kind == NodeKind::Chunk {
+            if let Some(text) = &node.properties.text {
+                let (mut enodes, mut eedges) = entity::regex::extract_entities(
+                    text, node.id, store, next_id,
+                )?;
+                entity_nodes.append(&mut enodes);
+                entity_edges.append(&mut eedges);
+            }
+        }
+    }
+
+    for node in &entity_nodes {
+        store.insert_node(node)?;
+    }
+    for edge in &entity_edges {
+        store.insert_edge(edge)?;
+    }
+
+    // Build co-occurrence edges
+    entity::regex::build_cooccurrence_edges(store, &nodes)?;
+
+    // Run GLiNER NER if available
+    if let Some(ref mut gliner) = ner {
+        let ner_labels = &config.ner.labels;
+        let ner_threshold = config.ner.threshold;
+        let mut chunk_entity_ids: Vec<Vec<i64>> = Vec::new();
+
+        for node in &nodes {
+            if node.kind == NodeKind::Chunk {
+                if let Some(text) = &node.properties.text {
+                    if !text.is_empty() {
+                        match gliner.extract(text, ner_labels, ner_threshold) {
+                            Ok(entities) => {
+                                let mut ids_in_chunk = Vec::new();
+                                for ent in &entities {
+                                    let entity_id = store.upsert_ner_entity(&ent.text, &ent.label)?;
+                                    store.insert_ner_mention(
+                                        entity_id,
+                                        node.id,
+                                        &doc.doc_id,
+                                        ent.score,
+                                        ent.start,
+                                        ent.end,
+                                    )?;
+                                    ids_in_chunk.push(entity_id);
+                                }
+                                chunk_entity_ids.push(ids_in_chunk);
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: NER failed on chunk: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build NER co-occurrence edges (entities in same chunk)
+        for ids in &chunk_entity_ids {
+            for i in 0..ids.len() {
+                for j in (i + 1)..ids.len() {
+                    if ids[i] != ids[j] {
+                        store.upsert_ner_edge(ids[i], ids[j])?;
+                    }
+                }
+            }
+        }
+    }
+
+    // Store document metadata
+    let doc_node_id = nodes.first().map(|n| n.id).unwrap_or(0);
+    store.insert_document(
+        doc_node_id,
+        &doc.doc_id,
+        &doc.content_type.as_str(),
+        nodes.first().and_then(|n| n.properties.title.as_deref()),
+        &doc.modified,
+        doc.size,
+        &doc.content_hash,
+        &Utc::now().to_rfc3339(),
+    )?;
+
+    if let Some(ref mut cb) = progress {
+        cb(ProgressEvent::FileComplete {
+            path: doc.doc_id.clone(),
+            chunks: total_chunks_in_file,
+            embeddings: file_embeddings,
+        });
+    }
+
+    Ok(DocOutcome::Indexed { chunks_embedded: file_embeddings })
+}
+
+// ── Public API for non-filesystem sources ──
+
+/// Ingest a batch of documents from any source (HTTP uploads, S3, etc.).
+/// Call `commit()` on fulltext/vector after this returns.
+pub fn ingest_documents(
+    docs: &[DocumentInput],
+    store: &GraphStore,
+    fulltext: &FulltextIndex,
+    mut vector: Option<&mut VectorIndex>,
+    mut ner: Option<&mut GlinerModel>,
+    config: &Config,
+    mut progress: Option<ProgressFn>,
+) -> Result<IngestResult> {
+    let mut result = IngestResult {
+        files_indexed: 0,
+        files_skipped: 0,
+        files_failed: 0,
+        chunks_embedded: 0,
+    };
+
+    let mut next_id = store.next_id()?;
+
+    for (i, doc) in docs.iter().enumerate() {
+        let doc_result = ingest_document(
+            doc, store, fulltext, vector.as_deref_mut(), ner.as_deref_mut(),
+            config, &mut next_id, &mut progress,
+            (i + 1) as u64,
+        )?;
+
+        match doc_result {
+            DocOutcome::Indexed { chunks_embedded } => {
+                result.files_indexed += 1;
+                result.chunks_embedded += chunks_embedded;
+            }
+            DocOutcome::Skipped => {
+                result.files_skipped += 1;
+            }
+            DocOutcome::Failed => {
+                result.files_failed += 1;
+            }
+        }
+    }
+
+    if let Some(ref mut cb) = progress {
+        cb(ProgressEvent::Committing);
+    }
+    fulltext.commit()?;
+    if let Some(v) = vector {
+        v.commit()?;
+    }
+    Ok(result)
+}
+
+// ── Helpers ──
 
 fn build_walker(path: &Path, exclude: &[String], config: &Config) -> ignore::Walk {
     let mut builder = WalkBuilder::new(path);

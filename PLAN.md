@@ -17,30 +17,41 @@ The open-source, local-first, single-binary investigative search engine. Index a
 - ONNX Runtime embeddings (all-MiniLM-L6-v2, statically linked via download-binaries)
 - Graph store: SQLite with nodes, edges, documents, entities, co-occurrence
 - Entity extraction: regex-based (emails, URLs, paths)
+- GLiNER zero-shot NER: ONNX model wired into ingest pipeline (needs model download + testing)
+- Multi-database: `raggy db` commands, auto-migration from flat layout, `--db` flag
+- Document tags (`--tag`) and metadata (`--meta key=value`) with tag-based query filtering
+- Source-agnostic ingest: `DocumentInput` abstraction decouples file reading from processing
 - Incremental indexing with SHA256 change detection
-- CLI: `index`, `query`, `status`, `reindex`, `config`
+- CLI: `index`, `query`, `status`, `reindex`, `config`, `db`
 - Progress reporting, Ctrl+C handling, stale lock cleanup
 
 ### What's Broken
 - **Query latency**: ~25s in debug build (model load dominates). Need release build.
 - **Empty snippets**: Vector-only results have no text. Need to look up chunk text from SQLite.
-- **Weak NER**: Regex only catches emails/URLs/paths. Can't extract people, orgs, locations.
+
+### Product Roadmap
+See [ROADMAP.md](ROADMAP.md) for the product evolution plan (API server, web UI, storage backends, ecosystem).
 
 ## Architecture
 
 ```
-CLI (clap)
+CLI (clap) ──── future: HTTP API (axum), Web UI
+  │
+  workspace.rs    — multi-database resolution, auto-migration
+  config.rs       — per-db config + global config (raggy.toml)
+  │
   ingest/
-    mod.rs         — file walker, orchestrates pipeline
-    trait.rs       — Extractor trait (planned)
+    mod.rs         — DocumentInput abstraction, source-agnostic processing
+                     ingest_paths() = filesystem source
+                     ingest_documents() = any source (HTTP, S3, etc.)
     markdown.rs    — pulldown-cmark parser
     plaintext.rs   — plaintext chunker
     code.rs        — tree-sitter (Rust/JS/Python)
     structured.rs  — JSON/YAML/TOML
     pdf.rs         — PDF extractor (planned)
   graph/
-    store.rs       — SQLite knowledge graph
-    traverse.rs    — graph traversal
+    store.rs       — SQLite: nodes, edges, documents, NER, tags, metadata
+    traverse.rs    — graph traversal (planned)
   index/
     fulltext.rs    — Tantivy BM25
     vector.rs      — HNSW (instant-distance)
@@ -50,7 +61,7 @@ CLI (clap)
     plan.rs        — hybrid search execution + score fusion
   entity/
     regex.rs       — regex NER + co-occurrence
-    ner.rs         — ONNX NER model (planned)
+    gliner.rs      — GLiNER zero-shot NER (ONNX)
     resolution.rs  — entity dedup/merge (planned)
 ```
 

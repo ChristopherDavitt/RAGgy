@@ -1,1 +1,5 @@
 /target
+/tantivy/*
+/test-docs/*
+/dbs/*
+/.raggy/*
