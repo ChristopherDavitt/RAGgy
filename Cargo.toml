@@ -31,6 +31,10 @@ toml = "0.8"
 regex = "1"
 lazy_static = "1"
 
+# File content extraction
+pdf-extract = "0.7"
+csv = "1"
+
 # File handling
 walkdir = "2"
 ignore = "0.4"

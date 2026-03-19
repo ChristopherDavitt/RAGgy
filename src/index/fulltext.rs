@@ -183,7 +183,7 @@ impl FulltextIndex {
 
 /// Generate a context-aware snippet by finding a ~300-char window around the first
 /// matching query term. Falls back to first 300 chars if no term matches.
-fn make_snippet(content: &str, query: &str) -> String {
+pub fn make_snippet(content: &str, query: &str) -> String {
     const WINDOW: usize = 300;
 
     let content_lower = content.to_lowercase();

@@ -1,5 +1,6 @@
 pub mod config;
 pub mod entity;
+pub mod extractors;
 pub mod graph;
 pub mod index;
 pub mod ingest;

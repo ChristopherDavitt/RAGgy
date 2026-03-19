@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use super::parser::QueryPlan;
 use crate::graph::store::GraphStore;
 use crate::graph::traverse::find_documents_for_entities;
-use crate::index::fulltext::{FulltextIndex, SearchResult};
+use crate::index::fulltext::{make_snippet, FulltextIndex, SearchResult};
 use crate::index::vector::VectorIndex;
 
 pub struct QueryResult {
@@ -60,7 +60,7 @@ pub fn execute_plan(
 
     // 4. HYBRID SCORING
     let mut candidates = if !vector_results.is_empty() && alpha > 0.0 {
-        hybrid_merge(&bm25_by_node, &vector_results, alpha)
+        hybrid_merge(&bm25_by_node, &vector_results, alpha, store, &query_string)
     } else {
         // Pure BM25 mode
         bm25_by_node.into_values().collect()
@@ -177,6 +177,8 @@ fn hybrid_merge(
     bm25_by_node: &HashMap<u64, SearchResult>,
     vector_results: &[crate::index::vector::VectorSearchResult],
     alpha: f32, // 0.0 = pure BM25, 1.0 = pure vector
+    store: &GraphStore,
+    query: &str,
 ) -> Vec<SearchResult> {
     // Normalize BM25 scores to [0, 1]
     let bm25_scores: Vec<f32> = bm25_by_node.values().map(|r| r.score).collect();
@@ -235,13 +237,31 @@ fn hybrid_merge(
                 1.0
             };
             let hybrid = alpha * vec_norm; // bm25 component is 0
+
+            // Look up chunk text from the graph store to build a snippet
+            let (snippet, title, content_type) = if let Ok(Some(node)) = store.get_node(vr.node_id) {
+                let text = node.properties.text.as_deref().unwrap_or("");
+                let snippet = if !text.is_empty() {
+                    make_snippet(text, query)
+                } else {
+                    String::new()
+                };
+                let title = node.properties.title.unwrap_or_default();
+                let ct = node.properties.content_type
+                    .map(|c| c.as_str())
+                    .unwrap_or_default();
+                (snippet, title, ct)
+            } else {
+                (String::new(), String::new(), String::new())
+            };
+
             merged.insert(vr.node_id, SearchResult {
                 node_id: vr.node_id,
                 doc_path: vr.doc_path.clone(),
                 score: hybrid,
-                snippet: String::new(),
-                title: String::new(),
-                content_type: String::new(),
+                snippet,
+                title,
+                content_type,
             });
         }
     }

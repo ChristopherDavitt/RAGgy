@@ -76,6 +76,9 @@ pub enum ContentType {
     Json,
     Yaml,
     Toml,
+    Pdf,
+    Html,
+    Csv,
 }
 
 impl ContentType {
@@ -87,6 +90,9 @@ impl ContentType {
             ContentType::Json => "json".to_string(),
             ContentType::Yaml => "yaml".to_string(),
             ContentType::Toml => "toml".to_string(),
+            ContentType::Pdf => "pdf".to_string(),
+            ContentType::Html => "html".to_string(),
+            ContentType::Csv => "csv".to_string(),
         }
     }
 
@@ -100,6 +106,9 @@ impl ContentType {
             "json" => Some(ContentType::Json),
             "yaml" => Some(ContentType::Yaml),
             "toml" => Some(ContentType::Toml),
+            "pdf" => Some(ContentType::Pdf),
+            "html" => Some(ContentType::Html),
+            "csv" => Some(ContentType::Csv),
             _ => None,
         }
     }
@@ -107,7 +116,7 @@ impl ContentType {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "md" | "mdx" => Some(ContentType::Markdown),
-            "txt" | "text" => Some(ContentType::PlainText),
+            "txt" | "text" | "log" => Some(ContentType::PlainText),
             "rs" => Some(ContentType::Code { language: "rust".to_string() }),
             "js" => Some(ContentType::Code { language: "javascript".to_string() }),
             "ts" => Some(ContentType::Code { language: "typescript".to_string() }),
@@ -117,6 +126,9 @@ impl ContentType {
             "json" => Some(ContentType::Json),
             "yaml" | "yml" => Some(ContentType::Yaml),
             "toml" => Some(ContentType::Toml),
+            "pdf" => Some(ContentType::Pdf),
+            "html" | "htm" => Some(ContentType::Html),
+            "csv" | "tsv" => Some(ContentType::Csv),
             _ => None,
         }
     }

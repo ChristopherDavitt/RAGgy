@@ -490,10 +490,10 @@ impl GraphStore {
         Ok(())
     }
 
-    /// Get NER entity count.
+    /// Get NER entity count (canonical only, excludes aliases).
     pub fn get_ner_entity_count(&self) -> Result<u64> {
         let count: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM ner_entities",
+            "SELECT COUNT(*) FROM ner_entities WHERE canonical_id IS NULL",
             [],
             |row| row.get(0),
         )?;
@@ -510,10 +510,10 @@ impl GraphStore {
         Ok(count)
     }
 
-    /// Find NER entities by name (partial match).
+    /// Find NER entities by name (partial match). Excludes aliases.
     pub fn find_ner_entities(&self, query: &str) -> Result<Vec<(i64, String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, entity_type FROM ner_entities WHERE name LIKE ?1 ORDER BY name"
+            "SELECT id, name, entity_type FROM ner_entities WHERE name LIKE ?1 AND canonical_id IS NULL ORDER BY name"
         )?;
         let pattern = format!("%{}%", query);
         let rows = stmt.query_map(params![pattern], |row| {
@@ -590,7 +590,67 @@ impl GraphStore {
         Ok(())
     }
 
-    /// Get all NER entities connected to a given entity via co-occurrence edges.
+    /// Search NER entities by exact name (case-insensitive).
+    /// Follows canonical_id to return the canonical entity if the match is an alias.
+    pub fn find_ner_entity_exact(&self, name: &str) -> Result<Option<(i64, String, String)>> {
+        let result = self.conn.query_row(
+            "SELECT id, name, entity_type, canonical_id FROM ner_entities WHERE LOWER(name) = LOWER(?1)",
+            params![name],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<i64>>(3)?)),
+        );
+        let found = match result {
+            Ok(r) => Some(r),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // Try partial match
+                let result2 = self.conn.query_row(
+                    "SELECT id, name, entity_type, canonical_id FROM ner_entities WHERE LOWER(name) LIKE LOWER(?1) ORDER BY LENGTH(name) ASC",
+                    params![format!("%{}%", name)],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<i64>>(3)?)),
+                );
+                match result2 {
+                    Ok(r) => Some(r),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        match found {
+            Some((id, name, etype, canonical_id)) => {
+                // If this is an alias, return the canonical entity instead
+                if let Some(cid) = canonical_id {
+                    let canonical = self.conn.query_row(
+                        "SELECT id, name, entity_type FROM ner_entities WHERE id = ?1",
+                        params![cid],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?;
+                    Ok(Some(canonical))
+                } else {
+                    Ok(Some((id, name, etype)))
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get documents where an NER entity was mentioned (includes alias mentions).
+    pub fn get_ner_entity_documents(&self, entity_id: i64) -> Result<Vec<(String, f32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT doc_path, MAX(confidence) as max_conf
+             FROM ner_mentions WHERE entity_id = ?1
+                OR entity_id IN (SELECT id FROM ner_entities WHERE canonical_id = ?1)
+             GROUP BY doc_path ORDER BY max_conf DESC"
+        )?;
+        let rows = stmt.query_map(params![entity_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Get all neighbors of an entity in the NER co-occurrence graph.
+    /// Excludes entities that have been merged (have a canonical_id).
+    /// Returns: (entity_id, name, type, weight, doc_count)
     pub fn get_ner_connections(&self, entity_id: i64) -> Result<Vec<(i64, String, String, f32, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.id, e.name, e.entity_type, ne.weight, ne.doc_count
@@ -598,7 +658,8 @@ impl GraphStore {
              JOIN ner_entities e ON (
                  CASE WHEN ne.entity_a = ?1 THEN ne.entity_b ELSE ne.entity_a END = e.id
              )
-             WHERE ne.entity_a = ?1 OR ne.entity_b = ?1
+             WHERE (ne.entity_a = ?1 OR ne.entity_b = ?1)
+               AND e.canonical_id IS NULL
              ORDER BY ne.weight DESC"
         )?;
         let rows = stmt.query_map(params![entity_id], |row| {

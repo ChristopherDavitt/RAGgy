@@ -33,6 +33,7 @@ pub enum ProgressEvent {
     FileSkipped { path: String },
     FileFailed { path: String, error: String },
     EmbeddingChunk { chunk_num: u64, total_in_file: u64 },
+    EntitiesResolved { merges: u64 },
     Committing,
 }
 
@@ -63,12 +64,13 @@ impl DocumentInput {
     }
 
     /// Create from in-memory bytes (e.g. HTTP upload, S3 object).
-    pub fn from_bytes(doc_id: String, name: String, bytes: &[u8], content_type: ContentType, modified: Option<String>) -> Self {
+    /// Uses the appropriate extractor based on file extension.
+    pub fn from_bytes(doc_id: String, name: String, bytes: &[u8], content_type: ContentType, extension: &str, modified: Option<String>) -> Result<Self> {
         let content_hash = compute_hash(bytes);
-        let content = String::from_utf8_lossy(bytes).to_string();
+        let content = crate::extractors::extract(bytes, extension)?;
         let size = bytes.len() as u64;
         let modified = modified.unwrap_or_else(|| Utc::now().to_rfc3339());
-        DocumentInput { doc_id, name, content, content_type, content_hash, size, modified }
+        Ok(DocumentInput { doc_id, name, content, content_type, content_hash, size, modified })
     }
 }
 
@@ -161,8 +163,23 @@ pub fn ingest_paths_with_progress(
                 .to_string_lossy()
                 .to_string();
 
-            let doc = DocumentInput::from_bytes(
-                path_str, name, &bytes, content_type, Some(modified),
+            // Extract text from bytes using the appropriate extractor
+            let content = match crate::extractors::extract(&bytes, &ext) {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Some(ref mut cb) = progress {
+                        cb(ProgressEvent::FileFailed {
+                            path: path_str,
+                            error: format!("Extraction failed: {}", e),
+                        });
+                    }
+                    result.files_failed += 1;
+                    continue;
+                }
+            };
+
+            let doc = DocumentInput::new(
+                path_str, name, content, content_type, metadata.len() as u64, modified,
             );
 
             // Delegate to the source-agnostic processor
@@ -183,6 +200,16 @@ pub fn ingest_paths_with_progress(
                 DocOutcome::Failed => {
                     result.files_failed += 1;
                 }
+            }
+        }
+    }
+
+    // Run entity resolution after all documents are processed
+    if config.ner.enabled {
+        let res = entity::resolution::resolve_entities(store)?;
+        if res.merges > 0 {
+            if let Some(ref mut cb) = progress {
+                cb(ProgressEvent::EntitiesResolved { merges: res.merges });
             }
         }
     }
@@ -244,6 +271,10 @@ fn ingest_document(
         ContentType::Code { language } => code::extract(&synthetic_path, &doc.content, language, next_id),
         ContentType::Json | ContentType::Yaml | ContentType::Toml => {
             structured::extract(&synthetic_path, &doc.content, &doc.content_type, next_id)
+        }
+        // PDF, HTML, CSV are already extracted to plain text by the extractors module
+        ContentType::Pdf | ContentType::Html | ContentType::Csv => {
+            plaintext::extract(&synthetic_path, &doc.content, next_id)
         }
     };
 
@@ -468,6 +499,16 @@ pub fn ingest_documents(
             }
             DocOutcome::Failed => {
                 result.files_failed += 1;
+            }
+        }
+    }
+
+    // Run entity resolution
+    if config.ner.enabled {
+        let res = entity::resolution::resolve_entities(store)?;
+        if res.merges > 0 {
+            if let Some(ref mut cb) = progress {
+                cb(ProgressEvent::EntitiesResolved { merges: res.merges });
             }
         }
     }

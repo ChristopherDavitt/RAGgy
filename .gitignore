@@ -1,5 +1,5 @@
 /target
 /tantivy/*
-/test-docs/*
 /dbs/*
 /.raggy/*
+/test-docs/

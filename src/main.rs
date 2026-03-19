@@ -13,6 +13,7 @@ use raggy::entity;
 use raggy::ingest;
 use raggy::query::parser;
 use raggy::query::plan;
+use raggy::graph::traverse;
 use raggy::workspace::Workspace;
 
 #[derive(Parser)]
@@ -92,6 +93,37 @@ enum Commands {
         value: Option<String>,
     },
 
+    /// Show entities connected to a given entity
+    Graph {
+        /// Entity name to explore
+        entity: String,
+
+        /// Max results
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Output format
+        #[arg(long, default_value = "human")]
+        format: OutputFormat,
+    },
+
+    /// Find path between two entities
+    Connect {
+        /// Source entity
+        from: String,
+
+        /// Target entity
+        to: String,
+
+        /// Maximum hops to search
+        #[arg(long, default_value = "5")]
+        depth: usize,
+
+        /// Output format
+        #[arg(long, default_value = "human")]
+        format: OutputFormat,
+    },
+
     /// Manage databases
     Db {
         #[command(subcommand)]
@@ -140,6 +172,8 @@ fn main() -> Result<()> {
                 Commands::Status => cmd_status(&ws),
                 Commands::Reindex { full } => cmd_reindex(full, &ws),
                 Commands::Config { key, value } => cmd_config(key, value, &ws),
+                Commands::Graph { entity, limit, format } => cmd_graph(&entity, limit, format, &ws),
+                Commands::Connect { from, to, depth, format } => cmd_connect(&from, &to, depth, format, &ws),
                 Commands::Db { .. } => unreachable!(),
             }
         }
@@ -259,6 +293,9 @@ fn cmd_index(paths: Vec<PathBuf>, exclude: Vec<String>, tags: Vec<String>, meta:
                 let name = Path::new(&path).file_name()
                     .unwrap_or_default().to_string_lossy();
                 eprintln!("  FAIL {} ({})", name, error);
+            }
+            EntitiesResolved { merges } => {
+                eprintln!("  Resolved {} entity aliases", merges);
             }
             Committing => {
                 eprintln!("  Committing indexes...");
@@ -624,6 +661,215 @@ fn cmd_config(key: Option<String>, value: Option<String>, ws: &Workspace) -> Res
         }
         (None, Some(_)) => {
             anyhow::bail!("Cannot set a value without a key");
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_graph(entity: &str, limit: usize, format: OutputFormat, ws: &Workspace) -> Result<()> {
+    if !ws.exists() {
+        anyhow::bail!("No index found in database '{}'. Run `raggy index <path>` first.", ws.db_name);
+    }
+
+    let store = GraphStore::open(&ws.db_path())?;
+
+    // Find the entity
+    let (entity_id, entity_name, entity_type) = match store.find_ner_entity_exact(entity)? {
+        Some(e) => e,
+        None => {
+            // Show suggestions
+            let similar = store.find_ner_entities(entity)?;
+            if similar.is_empty() {
+                println!("Entity '{}' not found.", entity);
+            } else {
+                println!("Entity '{}' not found. Did you mean:", entity);
+                for (_, name, etype) in &similar {
+                    println!("  {} ({})", name, etype);
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    // Get connections
+    let connections = store.get_ner_connections(entity_id)?;
+    let docs = store.get_ner_entity_documents(entity_id)?;
+
+    match format {
+        OutputFormat::Human => {
+            println!("{} {} ({})\n", "Entity:".bold(), entity_name.cyan().bold(), entity_type);
+
+            // Documents
+            if !docs.is_empty() {
+                println!("  {} ({}):", "Mentioned in".bold(), docs.len());
+                for (doc_path, conf) in &docs {
+                    let name = Path::new(doc_path).file_name()
+                        .unwrap_or_default().to_string_lossy();
+                    println!("    {} (confidence: {:.2})", name, conf);
+                }
+                println!();
+            }
+
+            // Connections
+            if connections.is_empty() {
+                println!("  No connections found.");
+            } else {
+                let shown = connections.len().min(limit);
+                println!("  {} ({} total, showing {}):", "Connected to".bold(), connections.len(), shown);
+                for (_, name, etype, weight, doc_count) in connections.iter().take(limit) {
+                    let weight_bar = "█".repeat((*weight as usize).min(20));
+                    println!(
+                        "    {} ({})  {} w={:.0} docs={}",
+                        name.cyan(),
+                        etype.dimmed(),
+                        weight_bar.yellow(),
+                        weight,
+                        doc_count,
+                    );
+                }
+            }
+        }
+        OutputFormat::Json => {
+            let conn_json: Vec<serde_json::Value> = connections.iter().take(limit).map(|(id, name, etype, weight, doc_count)| {
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "type": etype,
+                    "weight": weight,
+                    "doc_count": doc_count,
+                })
+            }).collect();
+
+            let output = serde_json::json!({
+                "entity": {
+                    "id": entity_id,
+                    "name": entity_name,
+                    "type": entity_type,
+                },
+                "documents": docs.iter().map(|(p, c)| serde_json::json!({"path": p, "confidence": c})).collect::<Vec<_>>(),
+                "connections": conn_json,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_connect(from: &str, to: &str, max_depth: usize, format: OutputFormat, ws: &Workspace) -> Result<()> {
+    if !ws.exists() {
+        anyhow::bail!("No index found in database '{}'. Run `raggy index <path>` first.", ws.db_name);
+    }
+
+    let store = GraphStore::open(&ws.db_path())?;
+
+    // Find source entity
+    let (from_id, from_name, from_type) = match store.find_ner_entity_exact(from)? {
+        Some(e) => e,
+        None => {
+            let similar = store.find_ner_entities(from)?;
+            if similar.is_empty() {
+                println!("Entity '{}' not found.", from);
+            } else {
+                println!("Entity '{}' not found. Did you mean:", from);
+                for (_, name, etype) in similar.iter().take(5) {
+                    println!("  {} ({})", name, etype);
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    // Find target entity
+    let (to_id, to_name, to_type) = match store.find_ner_entity_exact(to)? {
+        Some(e) => e,
+        None => {
+            let similar = store.find_ner_entities(to)?;
+            if similar.is_empty() {
+                println!("Entity '{}' not found.", to);
+            } else {
+                println!("Entity '{}' not found. Did you mean:", to);
+                for (_, name, etype) in similar.iter().take(5) {
+                    println!("  {} ({})", name, etype);
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    // Find shortest path
+    let path = traverse::find_shortest_path(&store, from_id, to_id, max_depth)?;
+
+    match format {
+        OutputFormat::Human => {
+            println!(
+                "{} {} ({}) {} ({}):\n",
+                "Path:".bold(),
+                from_name.cyan().bold(),
+                from_type,
+                to_name.cyan().bold(),
+                to_type,
+            );
+
+            match path {
+                None => {
+                    println!("  No connection found within {} hops.", max_depth);
+                }
+                Some(hops) => {
+                    if hops.is_empty() {
+                        println!("  Same entity.");
+                        return Ok(());
+                    }
+
+                    let total_hops = hops.len() - 1;
+                    println!("  {} {} found:\n", total_hops, if total_hops == 1 { "hop" } else { "hops" });
+
+                    for (i, hop) in hops.iter().enumerate() {
+                        let prefix = if i == 0 {
+                            "  START".green().bold().to_string()
+                        } else {
+                            format!("  {:>5}", format!("[{}]", i))
+                        };
+
+                        println!(
+                            "{}  {} ({})",
+                            prefix,
+                            hop.entity_name.cyan().bold(),
+                            hop.entity_type.dimmed(),
+                        );
+
+                        if !hop.shared_docs.is_empty() {
+                            let doc_names: Vec<String> = hop.shared_docs.iter()
+                                .map(|p| Path::new(p).file_name().unwrap_or_default().to_string_lossy().to_string())
+                                .collect();
+                            println!(
+                                "         {} via: {}",
+                                "│".dimmed(),
+                                doc_names.join(", ").dimmed(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        OutputFormat::Json => {
+            let output = serde_json::json!({
+                "from": { "id": from_id, "name": from_name, "type": from_type },
+                "to": { "id": to_id, "name": to_name, "type": to_type },
+                "path": path.as_ref().map(|hops| {
+                    hops.iter().map(|h| serde_json::json!({
+                        "entity_id": h.entity_id,
+                        "name": h.entity_name,
+                        "type": h.entity_type,
+                        "edge_weight": h.edge_weight,
+                        "shared_documents": h.shared_docs,
+                    })).collect::<Vec<_>>()
+                }),
+                "hops": path.as_ref().map(|h| if h.is_empty() { 0 } else { h.len() - 1 }),
+                "max_depth": max_depth,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
         }
     }
 
