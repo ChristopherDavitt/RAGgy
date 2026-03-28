@@ -249,6 +249,10 @@ fn is_already_merged(store: &GraphStore, entity_id: i64) -> Result<bool> {
     Ok(canonical.is_some())
 }
 
+/// Minimum entity name length for gradient resolution.  Very short names
+/// (e.g. "US", "UK") produce noisy embeddings that match too broadly.
+const MIN_GRADIENT_NAME_LEN: usize = 3;
+
 /// Run gradient-based entity resolution using embedding cosine similarity.
 ///
 /// For each type group, embeds all entity names and merges any pair whose cosine
@@ -266,15 +270,22 @@ pub fn gradient_resolve_entities(
     let all_entities = get_all_entities(store)?;
     let mut result = ResolutionResult { merges: 0, details: vec![] };
 
-    // Group unresolved entities by type
+    // Group unresolved entities by type, filtering out very short names
+    // that produce unreliable embeddings.
     let mut by_type: std::collections::HashMap<String, Vec<(i64, String)>> =
         std::collections::HashMap::new();
     for (id, name, etype, canonical_id) in &all_entities {
         if canonical_id.is_some() {
             continue; // already merged by rule-based pass
         }
+        if name.len() < MIN_GRADIENT_NAME_LEN {
+            continue; // too short for reliable embedding similarity
+        }
         by_type.entry(etype.clone()).or_default().push((*id, name.clone()));
     }
+
+    // Track merges locally to avoid per-pair DB round-trips.
+    let mut merged: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
     for (_etype, entities) in &by_type {
         if entities.len() < 2 {
@@ -285,7 +296,10 @@ pub fn gradient_resolve_entities(
         let names: Vec<&str> = entities.iter().map(|(_, n)| n.as_str()).collect();
         let embeddings = match vector.embed_batch(&names) {
             Ok(e) => e,
-            Err(_) => continue, // skip this type group if embedding fails
+            Err(e) => {
+                eprintln!("  warning: gradient resolution skipped type group: {}", e);
+                continue;
+            }
         };
 
         // Sort candidates by name length descending so longer (more specific) names
@@ -303,14 +317,14 @@ pub fn gradient_resolve_entities(
         for i in 0..n {
             let (ei, long_id, _long_name) = indexed[i];
 
-            if is_already_merged(store, long_id)? {
+            if merged.contains(&long_id) {
                 continue;
             }
 
             for j in (i + 1)..n {
                 let (ej, short_id, _short_name) = indexed[j];
 
-                if is_already_merged(store, short_id)? {
+                if merged.contains(&short_id) {
                     continue;
                 }
 
@@ -322,6 +336,7 @@ pub fn gradient_resolve_entities(
 
                 if sim >= threshold {
                     merge_entities(store, short_id, long_id)?;
+                    merged.insert(short_id);
                     result.merges += 1;
                     result.details.push((
                         entities[ej].1.clone(),
