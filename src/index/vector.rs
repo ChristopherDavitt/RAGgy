@@ -242,4 +242,14 @@ impl VectorIndex {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Embed a single text string. Exposes the internal embedder for external use.
+    pub fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+        self.embedder.embed(text)
+    }
+
+    /// Embed a batch of text strings. Exposes the internal embedder for external use.
+    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.embedder.embed_batch(texts)
+    }
 }

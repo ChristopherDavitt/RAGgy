@@ -42,6 +42,18 @@ pub struct NerConfig {
     pub model: String,
     pub labels: Vec<String>,
     pub threshold: f32,
+    /// Enable gradient-based (embedding similarity) entity resolution.
+    /// Requires the embedding model to be available.
+    #[serde(default)]
+    pub gradient_resolution: bool,
+    /// Cosine similarity threshold for gradient-based entity merging (0.0–1.0).
+    /// Higher values are more conservative (fewer merges). Default: 0.88.
+    #[serde(default = "default_gradient_threshold")]
+    pub gradient_threshold: f32,
+}
+
+fn default_gradient_threshold() -> f32 {
+    0.88
 }
 
 impl Default for NerConfig {
@@ -57,6 +69,8 @@ impl Default for NerConfig {
                 "money".to_string(),
             ],
             threshold: 0.5,
+            gradient_resolution: false,
+            gradient_threshold: 0.88,
         }
     }
 }
@@ -129,6 +143,8 @@ impl Config {
             "ner.model" => Some(self.ner.model.clone()),
             "ner.labels" => Some(format!("{:?}", self.ner.labels)),
             "ner.threshold" => Some(self.ner.threshold.to_string()),
+            "ner.gradient_resolution" => Some(self.ner.gradient_resolution.to_string()),
+            "ner.gradient_threshold" => Some(self.ner.gradient_threshold.to_string()),
             _ => None,
         }
     }
@@ -144,6 +160,8 @@ impl Config {
             "ner.enabled" => self.ner.enabled = value.parse()?,
             "ner.model" => self.ner.model = value.to_string(),
             "ner.threshold" => self.ner.threshold = value.parse()?,
+            "ner.gradient_resolution" => self.ner.gradient_resolution = value.parse()?,
+            "ner.gradient_threshold" => self.ner.gradient_threshold = value.parse()?,
             "ner.labels" => {
                 self.ner.labels = value.split(',').map(|s| s.trim().to_string()).collect();
             }

@@ -207,9 +207,21 @@ pub fn ingest_paths_with_progress(
     // Run entity resolution after all documents are processed
     if config.ner.enabled {
         let res = entity::resolution::resolve_entities(store)?;
-        if res.merges > 0 {
+        let mut total_merges = res.merges;
+
+        // Gradient-based (embedding similarity) resolution pass
+        if config.ner.gradient_resolution {
+            if let Some(ref mut v) = vector {
+                let gres = entity::resolution::gradient_resolve_entities(
+                    store, *v, config.ner.gradient_threshold,
+                )?;
+                total_merges += gres.merges;
+            }
+        }
+
+        if total_merges > 0 {
             if let Some(ref mut cb) = progress {
-                cb(ProgressEvent::EntitiesResolved { merges: res.merges });
+                cb(ProgressEvent::EntitiesResolved { merges: total_merges });
             }
         }
     }
@@ -506,9 +518,21 @@ pub fn ingest_documents(
     // Run entity resolution
     if config.ner.enabled {
         let res = entity::resolution::resolve_entities(store)?;
-        if res.merges > 0 {
+        let mut total_merges = res.merges;
+
+        // Gradient-based (embedding similarity) resolution pass
+        if config.ner.gradient_resolution {
+            if let Some(ref mut v) = vector {
+                let gres = entity::resolution::gradient_resolve_entities(
+                    store, *v, config.ner.gradient_threshold,
+                )?;
+                total_merges += gres.merges;
+            }
+        }
+
+        if total_merges > 0 {
             if let Some(ref mut cb) = progress {
-                cb(ProgressEvent::EntitiesResolved { merges: res.merges });
+                cb(ProgressEvent::EntitiesResolved { merges: total_merges });
             }
         }
     }
