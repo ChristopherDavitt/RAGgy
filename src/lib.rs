@@ -6,6 +6,7 @@ pub mod index;
 pub mod ingest;
 pub mod query;
 pub mod retrieval;
+pub mod serve;
 pub mod workspace;
 
 #[derive(thiserror::Error, Debug)]

@@ -124,6 +124,13 @@ enum Commands {
         format: OutputFormat,
     },
 
+    /// Start HTTP API server
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "3000")]
+        port: u16,
+    },
+
     /// Manage databases
     Db {
         #[command(subcommand)]
@@ -174,6 +181,7 @@ fn main() -> Result<()> {
                 Commands::Config { key, value } => cmd_config(key, value, &ws),
                 Commands::Graph { entity, limit, format } => cmd_graph(&entity, limit, format, &ws),
                 Commands::Connect { from, to, depth, format } => cmd_connect(&from, &to, depth, format, &ws),
+                Commands::Serve { port } => raggy::serve::start_server(port, ws),
                 Commands::Db { .. } => unreachable!(),
             }
         }
