@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::graph::store::GraphStore;
+use crate::index::vector::VectorIndex;
 
 /// Result of a resolution pass.
 pub struct ResolutionResult {
@@ -246,6 +247,107 @@ fn is_already_merged(store: &GraphStore, entity_id: i64) -> Result<bool> {
         |row| row.get(0),
     )?;
     Ok(canonical.is_some())
+}
+
+/// Minimum entity name length for gradient resolution.  Very short names
+/// (e.g. "US", "UK") produce noisy embeddings that match too broadly.
+const MIN_GRADIENT_NAME_LEN: usize = 3;
+
+/// Run gradient-based entity resolution using embedding cosine similarity.
+///
+/// For each type group, embeds all entity names and merges any pair whose cosine
+/// similarity exceeds `threshold`. This complements rule-based resolution by
+/// catching semantic aliases that string heuristics miss (e.g. "FBI" and
+/// "Federal Bureau of Investigation").
+///
+/// Should be called *after* `resolve_entities` so that already-merged entities
+/// are skipped and not re-processed.
+pub fn gradient_resolve_entities(
+    store: &GraphStore,
+    vector: &mut VectorIndex,
+    threshold: f32,
+) -> Result<ResolutionResult> {
+    let all_entities = get_all_entities(store)?;
+    let mut result = ResolutionResult { merges: 0, details: vec![] };
+
+    // Group unresolved entities by type, filtering out very short names
+    // that produce unreliable embeddings.
+    let mut by_type: std::collections::HashMap<String, Vec<(i64, String)>> =
+        std::collections::HashMap::new();
+    for (id, name, etype, canonical_id) in &all_entities {
+        if canonical_id.is_some() {
+            continue; // already merged by rule-based pass
+        }
+        if name.len() < MIN_GRADIENT_NAME_LEN {
+            continue; // too short for reliable embedding similarity
+        }
+        by_type.entry(etype.clone()).or_default().push((*id, name.clone()));
+    }
+
+    // Track merges locally to avoid per-pair DB round-trips.
+    let mut merged: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
+    for (_etype, entities) in &by_type {
+        if entities.len() < 2 {
+            continue;
+        }
+
+        // Embed all entity names in one batch
+        let names: Vec<&str> = entities.iter().map(|(_, n)| n.as_str()).collect();
+        let embeddings = match vector.embed_batch(&names) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("  warning: gradient resolution skipped type group: {}", e);
+                continue;
+            }
+        };
+
+        // Sort candidates by name length descending so longer (more specific) names
+        // become canonical when merging.
+        let mut indexed: Vec<(usize, i64, &str)> = entities
+            .iter()
+            .enumerate()
+            .map(|(i, (id, name))| (i, *id, name.as_str()))
+            .collect();
+        indexed.sort_by(|a, b| b.2.len().cmp(&a.2.len()));
+
+        // Pairwise cosine similarity — vectors are already L2-normalised, so
+        // dot product == cosine similarity.
+        let n = indexed.len();
+        for i in 0..n {
+            let (ei, long_id, _long_name) = indexed[i];
+
+            if merged.contains(&long_id) {
+                continue;
+            }
+
+            for j in (i + 1)..n {
+                let (ej, short_id, _short_name) = indexed[j];
+
+                if merged.contains(&short_id) {
+                    continue;
+                }
+
+                let sim: f32 = embeddings[ei]
+                    .iter()
+                    .zip(embeddings[ej].iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+
+                if sim >= threshold {
+                    merge_entities(store, short_id, long_id)?;
+                    merged.insert(short_id);
+                    result.merges += 1;
+                    result.details.push((
+                        entities[ej].1.clone(),
+                        entities[ei].1.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 fn merge_entities(store: &GraphStore, alias_id: i64, canonical_id: i64) -> Result<()> {
