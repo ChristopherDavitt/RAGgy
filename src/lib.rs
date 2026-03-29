@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod query;
 pub mod retrieval;
 pub mod serve;
+pub mod watch;
 pub mod workspace;
 
 #[derive(thiserror::Error, Debug)]

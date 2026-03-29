@@ -141,6 +141,14 @@ enum Commands {
     /// Add to Claude Desktop via: {"command":"raggy","args":["mcp"]}
     Mcp,
 
+    /// Watch directories and incrementally reindex on file changes.
+    /// Ideal for keeping the index in sync with a live memory directory
+    /// (e.g. ~/.openclaw/memory/) without manual reindexing.
+    Watch {
+        /// Directories to watch (defaults to current directory)
+        paths: Vec<PathBuf>,
+    },
+
     /// Manage databases
     Db {
         #[command(subcommand)]
@@ -193,6 +201,7 @@ fn main() -> Result<()> {
                 Commands::Connect { from, to, depth, format } => cmd_connect(&from, &to, depth, format, &ws),
                 Commands::Serve { port } => raggy::serve::start_server(port, ws),
                 Commands::Mcp => raggy::mcp::run(&ws),
+                Commands::Watch { paths } => raggy::watch::run(&paths, &ws),
                 Commands::Db { .. } => unreachable!(),
             }
         }
