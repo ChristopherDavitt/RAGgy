@@ -75,6 +75,12 @@ enum Commands {
         /// Filter by tag
         #[arg(long)]
         tag: Option<String>,
+
+        /// Number of sibling chunks to include before and after each matched
+        /// chunk for context. 0 = matched chunk only, 1 = ±1 chunk (default),
+        /// 2 = ±2 chunks, etc.
+        #[arg(long, default_value = "1")]
+        window: usize,
     },
 
     /// Show index statistics
@@ -173,8 +179,8 @@ fn main() -> Result<()> {
             let ws = Workspace::resolve(cli.db.as_deref())?;
             match cli.command {
                 Commands::Index { paths, exclude, tag, meta } => cmd_index(paths, exclude, tag, meta, &ws),
-                Commands::Query { query, format, limit, threshold, alpha, no_vectors, tag } => {
-                    cmd_query(&query, format, limit, threshold, alpha, no_vectors, tag.as_deref(), &ws)
+                Commands::Query { query, format, limit, threshold, alpha, no_vectors, tag, window } => {
+                    cmd_query(&query, format, limit, threshold, alpha, no_vectors, tag.as_deref(), window, &ws)
                 }
                 Commands::Status => cmd_status(&ws),
                 Commands::Reindex { full } => cmd_reindex(full, &ws),
@@ -355,6 +361,7 @@ fn cmd_query(
     alpha: Option<f32>,
     no_vectors: bool,
     tag_filter: Option<&str>,
+    window: usize,
     ws: &Workspace,
 ) -> Result<()> {
     if !ws.exists() {
@@ -385,7 +392,7 @@ fn cmd_query(
     });
 
     let mut results = plan::execute_plan(
-        &query_plan, &fulltext, vector.as_mut(), &store, limit, threshold, alpha,
+        &query_plan, &fulltext, vector.as_mut(), &store, limit, threshold, alpha, window,
     )?;
 
     // Filter by tag if specified
@@ -428,9 +435,16 @@ fn cmd_query(
                     result.content_type.dimmed(),
                     tag_str.magenta(),
                 );
+
+                // Show context window if available, otherwise fall back to snippet
+                let display_text = if !result.context.is_empty() {
+                    &result.context
+                } else {
+                    &result.snippet
+                };
                 println!(
                     "     \"{}\"",
-                    truncate_snippet(&result.snippet, 200).dimmed(),
+                    truncate_snippet(display_text, 400).dimmed(),
                 );
                 println!();
             }
@@ -448,6 +462,8 @@ fn cmd_query(
                     "content_type": r.content_type,
                     "title": r.title,
                     "snippet": r.snippet,
+                    "context": r.context,
+                    "node_id": r.node_id,
                     "entities": r.entities,
                     "modified": r.modified,
                     "tags": tags,

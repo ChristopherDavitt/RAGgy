@@ -510,6 +510,63 @@ impl GraphStore {
         Ok(count)
     }
 
+    /// Fetch a context window around a matched chunk.
+    ///
+    /// Walks up to the chunk's immediate parent (section or document) via a
+    /// `contains` edge, retrieves all sibling chunks ordered by node_id
+    /// (insertion order == document order), and returns the concatenated text
+    /// of the `window` chunks before and after the matched chunk.
+    ///
+    /// A `window` of 1 returns [prev, matched, next]; 0 returns just the
+    /// matched chunk's own text.  The result is always clamped to the
+    /// boundaries of the parent node — the window never crosses section or
+    /// document edges.
+    pub fn get_chunk_window(&self, chunk_id: u64, window: usize) -> Result<String> {
+        // Find the immediate parent that contains this chunk
+        let parent_id: Option<u64> = self.conn.query_row(
+            "SELECT from_node FROM edges WHERE to_node = ?1 AND kind = 'contains' LIMIT 1",
+            params![chunk_id],
+            |row| row.get(0),
+        ).ok();
+
+        let parent_id = match parent_id {
+            Some(id) => id,
+            None => return Ok(String::new()),
+        };
+
+        // Fetch all chunks under the same parent, ordered by node_id.
+        // json_extract pulls the text field out of the JSON properties blob.
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, COALESCE(json_extract(n.properties, '$.text'), '')
+             FROM edges e
+             JOIN nodes n ON n.id = e.to_node
+             WHERE e.from_node = ?1
+               AND e.kind = 'contains'
+               AND n.kind = 'chunk'
+             ORDER BY n.id ASC"
+        )?;
+        let siblings: Vec<(u64, String)> = stmt
+            .query_map(params![parent_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let pos = match siblings.iter().position(|(id, _)| *id == chunk_id) {
+            Some(p) => p,
+            None => return Ok(String::new()),
+        };
+
+        let start = pos.saturating_sub(window);
+        let end = (pos + window + 1).min(siblings.len());
+
+        let context = siblings[start..end]
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        Ok(context)
+    }
+
     /// Find NER entities by name (partial match). Excludes aliases.
     pub fn find_ner_entities(&self, query: &str) -> Result<Vec<(i64, String, String)>> {
         let mut stmt = self.conn.prepare(

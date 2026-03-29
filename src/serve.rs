@@ -63,6 +63,8 @@ struct QueryParams {
     #[serde(default)]
     threshold: f32,
     tag: Option<String>,
+    /// Context window size (chunks before/after matched chunk). Defaults to 1.
+    window: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -129,6 +131,7 @@ async fn handle_query(
             params.limit,
             params.threshold,
             alpha,
+            params.window.unwrap_or(1),
         )?;
 
         // Apply tag filter
@@ -151,6 +154,8 @@ async fn handle_query(
                     "content_type": r.content_type,
                     "title": r.title,
                     "snippet": r.snippet,
+                    "context": r.context,
+                    "node_id": r.node_id,
                 })
             })
             .collect();

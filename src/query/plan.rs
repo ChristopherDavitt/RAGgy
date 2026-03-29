@@ -13,6 +13,11 @@ pub struct QueryResult {
     pub content_type: String,
     pub title: String,
     pub snippet: String,
+    /// Surrounding context window: the matched chunk plus up to `window`
+    /// sibling chunks on each side within the same section/document.
+    /// Empty string when window=0 or context fetch fails.
+    pub context: String,
+    pub node_id: u64,
     pub entities: Vec<String>,
     pub modified: Option<String>,
 }
@@ -25,6 +30,7 @@ pub fn execute_plan(
     limit: usize,
     threshold: f32,
     alpha: f32,
+    window: usize,
 ) -> Result<Vec<QueryResult>> {
     // 1. BUILD TANTIVY QUERY
     let query_string = if plan.keywords.is_empty() {
@@ -157,12 +163,19 @@ pub fn execute_plan(
     candidates.retain(|r| r.score >= threshold);
 
     let results: Vec<QueryResult> = candidates.into_iter().map(|r| {
+        let context = if window > 0 {
+            store.get_chunk_window(r.node_id, window).unwrap_or_default()
+        } else {
+            String::new()
+        };
         QueryResult {
             path: r.doc_path,
             score: r.score,
             content_type: r.content_type,
             title: r.title,
             snippet: r.snippet,
+            context,
+            node_id: r.node_id,
             entities: Vec::new(),
             modified: None,
         }
