@@ -137,6 +137,10 @@ enum Commands {
         port: u16,
     },
 
+    /// Start MCP (Model Context Protocol) server on stdio.
+    /// Add to Claude Desktop via: {"command":"raggy","args":["mcp"]}
+    Mcp,
+
     /// Manage databases
     Db {
         #[command(subcommand)]
@@ -188,6 +192,7 @@ fn main() -> Result<()> {
                 Commands::Graph { entity, limit, format } => cmd_graph(&entity, limit, format, &ws),
                 Commands::Connect { from, to, depth, format } => cmd_connect(&from, &to, depth, format, &ws),
                 Commands::Serve { port } => raggy::serve::start_server(port, ws),
+                Commands::Mcp => raggy::mcp::run(&ws),
                 Commands::Db { .. } => unreachable!(),
             }
         }
