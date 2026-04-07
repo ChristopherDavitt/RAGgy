@@ -22,7 +22,6 @@ use anyhow::Result;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 
-use crate::config::Config;
 use crate::graph::store::GraphStore;
 use crate::index::fulltext::FulltextIndex;
 use crate::index::vector::VectorIndex;

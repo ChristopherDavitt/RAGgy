@@ -1,11 +1,21 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
+use chrono::Utc;
 use super::parser::QueryPlan;
 use crate::graph::store::GraphStore;
 use crate::graph::traverse::find_documents_for_entities;
 use crate::index::fulltext::{make_snippet, FulltextIndex, SearchResult};
 use crate::index::vector::VectorIndex;
+
+/// Half-life for recency decay in days.  A document modified this many days
+/// ago receives half the recency boost of one modified today.
+const RECENCY_HALF_LIFE_DAYS: f32 = 30.0;
+
+/// Maximum additive score contribution from recency boost.
+/// Using multiplicative form: score *= (1 + RECENCY_WEIGHT * decay)
+/// so a document from today has its score scaled by (1 + RECENCY_WEIGHT).
+const RECENCY_WEIGHT: f32 = 0.4;
 
 pub struct QueryResult {
     pub path: String,
@@ -31,6 +41,7 @@ pub fn execute_plan(
     threshold: f32,
     alpha: f32,
     window: usize,
+    recency: bool,
 ) -> Result<Vec<QueryResult>> {
     // 1. BUILD TANTIVY QUERY
     let query_string = if plan.keywords.is_empty() {
@@ -82,15 +93,49 @@ pub fn execute_plan(
         candidates.retain(|r| r.doc_path.contains(&scope_str));
     }
 
-    // Date filter
-    if let Some(ref _date_range) = plan.date_filter {
+    // 5b. DATE FILTER + RECENCY BOOST
+    // Batch-fetch modified times once for all candidate paths so we avoid
+    // per-candidate DB round-trips.
+    let need_modified = plan.date_filter.is_some() || recency;
+    let modified_map = if need_modified {
+        let paths: Vec<&str> = candidates.iter().map(|r| r.doc_path.as_str()).collect();
+        store.get_documents_modified(&paths)?
+    } else {
+        HashMap::new()
+    };
+
+    // Hard date filter — drop candidates outside the requested window.
+    if let Some(ref date_range) = plan.date_filter {
         candidates.retain(|r| {
-            if let Ok(Some(_node_id)) = store.get_document_by_path(&r.doc_path) {
-                true
-            } else {
-                true
+            let Some(modified) = modified_map.get(&r.doc_path) else {
+                return true; // unknown modified time — keep rather than silently drop
+            };
+            if let Some(after) = date_range.after {
+                if *modified < after {
+                    return false;
+                }
             }
+            if let Some(before) = date_range.before {
+                if *modified > before {
+                    return false;
+                }
+            }
+            true
         });
+    }
+
+    // Recency boost — multiplicative so relevance ordering is preserved.
+    // score *= (1 + RECENCY_WEIGHT * exp(-λ * days_since_modified))
+    if recency {
+        let now = Utc::now();
+        let lambda = std::f32::consts::LN_2 / RECENCY_HALF_LIFE_DAYS;
+        for candidate in &mut candidates {
+            if let Some(modified) = modified_map.get(&candidate.doc_path) {
+                let days = (now - *modified).num_seconds().max(0) as f32 / 86_400.0;
+                let decay = (-lambda * days).exp();
+                candidate.score *= 1.0 + RECENCY_WEIGHT * decay;
+            }
+        }
     }
 
     // 6. GRAPH BOOST

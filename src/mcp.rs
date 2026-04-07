@@ -247,9 +247,26 @@ fn tool_search(
     let limit     = args["limit"].as_u64().unwrap_or(5) as usize;
     let window    = args["window"].as_u64().unwrap_or(1) as usize;
     let threshold = args["threshold"].as_f64().unwrap_or(0.0) as f32;
+    let recent    = args["recent"].as_bool().unwrap_or(false);
 
-    let query_plan = parser::parse_query(query);
+    let mut query_plan = parser::parse_query(query);
     let alpha = query_plan.suggested_alpha.unwrap_or(config.embedding.alpha);
+
+    // Optional explicit date range
+    let from_str = args["from"].as_str();
+    let to_str   = args["to"].as_str();
+    if from_str.is_some() || to_str.is_some() {
+        use crate::query::parser::DateRange;
+        use chrono::{NaiveDate, TimeZone, Utc};
+        let parse = |s: &str| -> Option<chrono::DateTime<Utc>> {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+                .and_then(|d| Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?)))
+        };
+        query_plan.date_filter = Some(DateRange {
+            after:  from_str.and_then(parse),
+            before: to_str.and_then(parse),
+        });
+    }
 
     let results = match plan::execute_plan(
         &query_plan,
@@ -260,6 +277,7 @@ fn tool_search(
         threshold,
         alpha,
         window,
+        recent,
     ) {
         Ok(r) => r,
         Err(e) => return tool_error(id, &format!("Search failed: {}", e)),

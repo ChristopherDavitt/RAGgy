@@ -16,7 +16,7 @@ pub struct QueryPlan {
     pub suggested_alpha: Option<f32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct DateRange {
     pub after: Option<DateTime<Utc>>,
     pub before: Option<DateTime<Utc>>,

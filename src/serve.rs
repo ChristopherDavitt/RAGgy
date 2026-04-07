@@ -65,6 +65,13 @@ struct QueryParams {
     tag: Option<String>,
     /// Context window size (chunks before/after matched chunk). Defaults to 1.
     window: Option<usize>,
+    /// ISO date string — only return docs modified on or after this date.
+    from: Option<String>,
+    /// ISO date string — only return docs modified on or before this date.
+    to: Option<String>,
+    /// Apply exponential recency boost (30-day half-life).
+    #[serde(default)]
+    recent: bool,
 }
 
 #[derive(Deserialize)]
@@ -120,8 +127,27 @@ async fn handle_query(
         let fulltext = state.fulltext.lock().unwrap();
         let mut vector_guard = state.vector.lock().unwrap();
 
-        let query_plan = parser::parse_query(&params.q);
+        let mut query_plan = parser::parse_query(&params.q);
         let alpha = params.alpha.unwrap_or(state.config.embedding.alpha);
+
+        // Explicit from/to override any NL date expression in the query.
+        if params.from.is_some() || params.to.is_some() {
+            use crate::query::parser::DateRange;
+            use chrono::{NaiveDate, TimeZone, Utc};
+            let parse = |s: &str| -> Option<chrono::DateTime<Utc>> {
+                if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                    return Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
+                }
+                if let Ok(d) = NaiveDate::parse_from_str(&format!("{}-01", s), "%Y-%m-%d") {
+                    return Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
+                }
+                None
+            };
+            query_plan.date_filter = Some(DateRange {
+                after:  params.from.as_deref().and_then(parse),
+                before: params.to.as_deref().and_then(parse),
+            });
+        }
 
         let results = plan::execute_plan(
             &query_plan,
@@ -132,6 +158,7 @@ async fn handle_query(
             params.threshold,
             alpha,
             params.window.unwrap_or(1),
+            params.recent,
         )?;
 
         // Apply tag filter

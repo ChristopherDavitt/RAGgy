@@ -417,6 +417,34 @@ impl GraphStore {
         }
     }
 
+    /// Batch-fetch modified timestamps for a set of document paths.
+    /// Returns a map of path → DateTime<Utc>.  Paths not found are absent.
+    pub fn get_documents_modified(
+        &self,
+        paths: &[&str],
+    ) -> Result<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>> {
+        if paths.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders: Vec<String> = (1..=paths.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT path, modified FROM documents WHERE path IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt.query_map(rusqlite::params_from_iter(paths.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows.filter_map(|r| r.ok()) {
+            let (path, modified_str) = row;
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&modified_str) {
+                map.insert(path, dt.with_timezone(&chrono::Utc));
+            }
+        }
+        Ok(map)
+    }
+
     pub fn conn(&self) -> &Connection {
         &self.conn
     }

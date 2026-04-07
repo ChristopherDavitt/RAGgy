@@ -81,6 +81,21 @@ enum Commands {
         /// 2 = ±2 chunks, etc.
         #[arg(long, default_value = "1")]
         window: usize,
+
+        /// Only return documents modified on or after this date (YYYY-MM-DD or YYYY-MM).
+        /// Overrides any date expression in the query text.
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Only return documents modified on or before this date (YYYY-MM-DD or YYYY-MM).
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Boost recently modified documents.  Uses exponential decay with a
+        /// 30-day half-life — documents modified today score ~40% higher than
+        /// identical content from months ago.
+        #[arg(long)]
+        recent: bool,
     },
 
     /// Show index statistics
@@ -191,8 +206,8 @@ fn main() -> Result<()> {
             let ws = Workspace::resolve(cli.db.as_deref())?;
             match cli.command {
                 Commands::Index { paths, exclude, tag, meta } => cmd_index(paths, exclude, tag, meta, &ws),
-                Commands::Query { query, format, limit, threshold, alpha, no_vectors, tag, window } => {
-                    cmd_query(&query, format, limit, threshold, alpha, no_vectors, tag.as_deref(), window, &ws)
+                Commands::Query { query, format, limit, threshold, alpha, no_vectors, tag, window, from, to, recent } => {
+                    cmd_query(&query, format, limit, threshold, alpha, no_vectors, tag.as_deref(), window, from.as_deref(), to.as_deref(), recent, &ws)
                 }
                 Commands::Status => cmd_status(&ws),
                 Commands::Reindex { full } => cmd_reindex(full, &ws),
@@ -376,6 +391,9 @@ fn cmd_query(
     no_vectors: bool,
     tag_filter: Option<&str>,
     window: usize,
+    from: Option<&str>,
+    to: Option<&str>,
+    recent: bool,
     ws: &Workspace,
 ) -> Result<()> {
     if !ws.exists() {
@@ -399,14 +417,22 @@ fn cmd_query(
 
     let start = Instant::now();
 
-    let query_plan = parser::parse_query(query);
+    let mut query_plan = parser::parse_query(query);
+
+    // Explicit --from / --to override any date expression found in the query text.
+    if from.is_some() || to.is_some() {
+        query_plan.date_filter = Some(parser::DateRange {
+            after:  from.and_then(parse_date_arg),
+            before: to.and_then(parse_date_arg),
+        });
+    }
 
     let alpha = alpha.unwrap_or_else(|| {
         query_plan.suggested_alpha.unwrap_or(config.embedding.alpha)
     });
 
     let mut results = plan::execute_plan(
-        &query_plan, &fulltext, vector.as_mut(), &store, limit, threshold, alpha, window,
+        &query_plan, &fulltext, vector.as_mut(), &store, limit, threshold, alpha, window, recent,
     )?;
 
     // Filter by tag if specified
@@ -1033,6 +1059,26 @@ fn cmd_db(action: DbAction, db_override: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse a CLI date argument into a UTC DateTime.
+/// Accepts: YYYY-MM-DD, YYYY-MM (start of month), YYYY (start of year).
+fn parse_date_arg(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveDate, TimeZone, Utc};
+    let s = s.trim();
+    // YYYY-MM-DD
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
+    }
+    // YYYY-MM
+    if let Ok(d) = NaiveDate::parse_from_str(&format!("{}-01", s), "%Y-%m-%d") {
+        return Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
+    }
+    // YYYY
+    if let Ok(d) = NaiveDate::parse_from_str(&format!("{}-01-01", s), "%Y-%m-%d") {
+        return Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
+    }
+    None
 }
 
 fn truncate_snippet(s: &str, max_len: usize) -> String {
