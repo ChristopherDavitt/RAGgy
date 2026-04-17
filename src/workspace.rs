@@ -1,24 +1,37 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use crate::config::{Config, GlobalConfig};
 
 /// Resolved workspace paths for a specific database.
 pub struct Workspace {
-    pub raggy_dir: PathBuf,   // .raggy/
+    pub raggy_dir: PathBuf,   // ~/.raggy/ (or RAGGY_HOME / --home override)
     pub db_name: String,      // e.g. "default"
-    pub db_dir: PathBuf,      // .raggy/dbs/default/
-    pub models_dir: PathBuf,  // .raggy/models/ (shared)
+    pub db_dir: PathBuf,      // ~/.raggy/dbs/default/
+    pub models_dir: PathBuf,  // ~/.raggy/models/ (shared across databases)
 }
 
 impl Workspace {
     /// Resolve which database to use and return all paths.
-    /// Priority: db_override > RAGGY_DB env > global config > "default"
-    pub fn resolve(db_override: Option<&str>) -> Result<Self> {
-        let raggy_dir = find_raggy_root();
+    ///
+    /// Resolution order:
+    ///   home_override  (--home CLI flag)
+    ///   RAGGY_HOME     (env var)
+    ///   ~/.raggy/      (global default)
+    ///
+    /// If the resolved home does not exist, an error is returned asking
+    /// the user to run `raggy init`.
+    pub fn resolve(home_override: Option<&Path>, db_override: Option<&str>) -> Result<Self> {
+        let raggy_dir = home_override
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(default_home);
 
-        // Auto-migrate from flat layout if needed
-        maybe_migrate(&raggy_dir)?;
+        if !raggy_dir.exists() {
+            anyhow::bail!(
+                "RAGgy home not found at {}.\nRun `raggy init` to set up RAGgy.",
+                raggy_dir.display()
+            );
+        }
 
         let global = GlobalConfig::load(&raggy_dir)?;
 
@@ -41,6 +54,7 @@ impl Workspace {
     pub fn ensure_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(&self.db_dir)?;
         std::fs::create_dir_all(&self.models_dir)?;
+        std::fs::create_dir_all(&self.documents_dir())?;
         Ok(())
     }
 
@@ -54,6 +68,11 @@ impl Workspace {
 
     pub fn vector_dir(&self) -> PathBuf {
         self.db_dir.join("vectors")
+    }
+
+    /// Directory where processed document copies are stored.
+    pub fn documents_dir(&self) -> PathBuf {
+        self.db_dir.join("documents")
     }
 
     pub fn config(&self) -> Result<Config> {
@@ -100,7 +119,6 @@ impl Workspace {
             anyhow::bail!("Database '{}' already exists", name);
         }
         std::fs::create_dir_all(&db_dir)?;
-        // Write default config
         let config = Config::default();
         config.save(&db_dir)?;
         Ok(db_dir)
@@ -119,68 +137,14 @@ impl Workspace {
     }
 }
 
-/// Find the .raggy directory, starting from current dir and walking up.
-fn find_raggy_root() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut dir = cwd.as_path();
-    loop {
-        let raggy_dir = dir.join(".raggy");
-        if raggy_dir.exists() {
-            return raggy_dir;
-        }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => return cwd.join(".raggy"),
-        }
+/// Return the default RAGgy home directory.
+///
+/// Priority: RAGGY_HOME env var → ~/.raggy/
+pub fn default_home() -> PathBuf {
+    if let Ok(h) = std::env::var("RAGGY_HOME") {
+        return PathBuf::from(h);
     }
-}
-
-/// Auto-migrate from flat .raggy/ layout to .raggy/dbs/default/.
-fn maybe_migrate(raggy_dir: &Path) -> Result<()> {
-    let old_db = raggy_dir.join("raggy.db");
-    let dbs_dir = raggy_dir.join("dbs");
-
-    // Only migrate if old layout exists and new layout doesn't
-    if !old_db.exists() || dbs_dir.exists() {
-        return Ok(());
-    }
-
-    eprintln!("Migrating index to multi-database layout...");
-
-    let default_dir = dbs_dir.join("default");
-    std::fs::create_dir_all(&default_dir)
-        .context("Failed to create dbs/default directory")?;
-
-    // Move database files
-    let files_to_move = ["raggy.db", "raggy.db-wal", "raggy.db-shm", "config.toml"];
-    for file in &files_to_move {
-        let src = raggy_dir.join(file);
-        if src.exists() {
-            let dst = default_dir.join(file);
-            std::fs::rename(&src, &dst)
-                .with_context(|| format!("Failed to move {}", file))?;
-        }
-    }
-
-    // Move directories
-    let dirs_to_move = ["tantivy", "vectors"];
-    for dir in &dirs_to_move {
-        let src = raggy_dir.join(dir);
-        if src.exists() {
-            let dst = default_dir.join(dir);
-            std::fs::rename(&src, &dst)
-                .with_context(|| format!("Failed to move {}/", dir))?;
-        }
-    }
-
-    // models/ stays in place (shared)
-
-    // Write global config
-    let global = GlobalConfig::default();
-    global.save(raggy_dir)?;
-
-    eprintln!("Migrated existing index to database 'default'.");
-    eprintln!("Use `raggy db list` to see databases.\n");
-
-    Ok(())
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".raggy")
 }

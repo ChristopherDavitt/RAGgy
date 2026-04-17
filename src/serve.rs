@@ -183,6 +183,7 @@ async fn handle_query(
                     "snippet": r.snippet,
                     "context": r.context,
                     "node_id": r.node_id,
+                    "stored_path": r.stored_path,
                 })
             })
             .collect();

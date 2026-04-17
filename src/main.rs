@@ -19,6 +19,10 @@ use raggy::workspace::Workspace;
 #[derive(Parser)]
 #[command(name = "raggy", about = "Structured search engine for AI agents")]
 struct Cli {
+    /// RAGgy home directory (default: ~/.raggy or $RAGGY_HOME)
+    #[arg(long, global = true)]
+    home: Option<String>,
+
     /// Database to use (overrides default)
     #[arg(long, global = true)]
     db: Option<String>,
@@ -169,6 +173,10 @@ enum Commands {
         #[command(subcommand)]
         action: DbAction,
     },
+
+    /// Initialize RAGgy: create home directory and download required models.
+    /// Run this once after installing raggy.
+    Init,
 }
 
 #[derive(Subcommand)]
@@ -200,10 +208,18 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    let home_path = cli.home.as_deref().map(Path::new);
+
     match cli.command {
-        Commands::Db { action } => cmd_db(action, cli.db.as_deref()),
+        Commands::Init => {
+            let home = home_path
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(raggy::workspace::default_home);
+            raggy::init::run(&home)
+        }
+        Commands::Db { action } => cmd_db(action, home_path, cli.db.as_deref()),
         _ => {
-            let ws = Workspace::resolve(cli.db.as_deref())?;
+            let ws = Workspace::resolve(home_path, cli.db.as_deref())?;
             match cli.command {
                 Commands::Index { paths, exclude, tag, meta } => cmd_index(paths, exclude, tag, meta, &ws),
                 Commands::Query { query, format, limit, threshold, alpha, no_vectors, tag, window, from, to, recent } => {
@@ -217,7 +233,7 @@ fn main() -> Result<()> {
                 Commands::Serve { port } => raggy::serve::start_server(port, ws),
                 Commands::Mcp => raggy::mcp::run(&ws),
                 Commands::Watch { paths } => raggy::watch::run(&paths, &ws),
-                Commands::Db { .. } => unreachable!(),
+                Commands::Db { .. } | Commands::Init => unreachable!(),
             }
         }
     }
@@ -346,8 +362,10 @@ fn cmd_index(paths: Vec<PathBuf>, exclude: Vec<String>, tags: Vec<String>, meta:
         }
     });
 
+    ws.ensure_dirs()?; // ensures documents_dir exists
     let result = ingest::ingest_paths_with_progress(
         &paths, &exclude, &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config, Some(progress),
+        Some(&ws.documents_dir()),
     )?;
 
     // Apply tags and metadata to newly indexed documents
@@ -506,6 +524,7 @@ fn cmd_query(
                     "node_id": r.node_id,
                     "entities": r.entities,
                     "modified": r.modified,
+                    "stored_path": r.stored_path,
                     "tags": tags,
                     "metadata": meta_obj,
                 })
@@ -645,7 +664,7 @@ fn cmd_reindex(full: bool, ws: &Workspace) -> Result<()> {
         }
 
         let start = Instant::now();
-        let result = ingest::ingest_paths(&dirs, &[], &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config)?;
+        let result = ingest::ingest_paths(&dirs, &[], &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config, Some(&ws.documents_dir()))?;
         let elapsed = start.elapsed();
 
         println!(
@@ -685,7 +704,7 @@ fn cmd_reindex(full: bool, ws: &Workspace) -> Result<()> {
             }
         }
 
-        let result = ingest::ingest_paths(&dirs, &[], &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config)?;
+        let result = ingest::ingest_paths(&dirs, &[], &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config, Some(&ws.documents_dir()))?;
         let elapsed = start.elapsed();
 
         println!(
@@ -940,9 +959,8 @@ fn cmd_connect(from: &str, to: &str, max_depth: usize, format: OutputFormat, ws:
     Ok(())
 }
 
-fn cmd_db(action: DbAction, db_override: Option<&str>) -> Result<()> {
-    // For db commands, we need the raggy_dir but not necessarily a resolved database
-    let ws = Workspace::resolve(db_override)?;
+fn cmd_db(action: DbAction, home_override: Option<&Path>, db_override: Option<&str>) -> Result<()> {
+    let ws = Workspace::resolve(home_override, db_override)?;
 
     match action {
         DbAction::List => {

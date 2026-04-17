@@ -140,6 +140,7 @@ pub fn run(paths: &[PathBuf], ws: &Workspace) -> Result<()> {
                         vector.as_mut(),
                         None, // GLiNER not needed for watch mode
                         &config,
+                        Some(&ws.documents_dir()),
                     );
                     match result {
                         Ok(r) => {

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod init;
 pub mod entity;
 pub mod extractors;
 pub mod graph;

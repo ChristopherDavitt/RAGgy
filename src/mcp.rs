@@ -294,7 +294,10 @@ fn tool_search(
         if !r.title.is_empty() {
             text.push_str(&format!("  |  Title: {}", r.title));
         }
-        text.push_str("\n\n");
+        if let Some(ref sp) = r.stored_path {
+            text.push_str(&format!("File: {}\n", sp));
+        }
+        text.push_str("\n");
 
         // Prefer the context window; fall back to the snippet.
         let body = if !r.context.is_empty() { &r.context } else { &r.snippet };

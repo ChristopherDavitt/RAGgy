@@ -15,6 +15,7 @@ impl GraphStore {
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         let store = GraphStore { conn };
         store.create_tables()?;
+        store.migrate()?;
         Ok(store)
     }
 
@@ -28,7 +29,8 @@ impl GraphStore {
                 modified TEXT NOT NULL,
                 size INTEGER NOT NULL,
                 content_hash TEXT NOT NULL,
-                indexed_at TEXT NOT NULL
+                indexed_at TEXT NOT NULL,
+                stored_path TEXT
             );
 
             CREATE TABLE IF NOT EXISTS nodes (
@@ -108,6 +110,16 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Idempotent schema migrations for existing databases.
+    fn migrate(&self) -> Result<()> {
+        // Add stored_path column if it didn't exist before this version.
+        // SQLite returns an error if the column already exists; we ignore it.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE documents ADD COLUMN stored_path TEXT;"
+        );
+        Ok(())
+    }
+
     pub fn next_id(&self) -> Result<u64> {
         let max_id: Option<u64> = self.conn.query_row(
             "SELECT MAX(id) FROM nodes",
@@ -145,11 +157,13 @@ impl GraphStore {
         size: u64,
         content_hash: &str,
         indexed_at: &str,
+        stored_path: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO documents (node_id, path, content_type, title, modified, size, content_hash, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![node_id, path, content_type, title, modified, size, content_hash, indexed_at],
+            "INSERT OR REPLACE INTO documents \
+             (node_id, path, content_type, title, modified, size, content_hash, indexed_at, stored_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![node_id, path, content_type, title, modified, size, content_hash, indexed_at, stored_path],
         )?;
         Ok(())
     }
@@ -441,6 +455,30 @@ impl GraphStore {
             if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&modified_str) {
                 map.insert(path, dt.with_timezone(&chrono::Utc));
             }
+        }
+        Ok(map)
+    }
+
+    /// Batch-fetch stored_path values for a set of document paths.
+    pub fn get_documents_stored_paths(
+        &self,
+        paths: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if paths.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders: Vec<String> = (1..=paths.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT path, stored_path FROM documents WHERE path IN ({}) AND stored_path IS NOT NULL",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt.query_map(rusqlite::params_from_iter(paths.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows.filter_map(|r| r.ok()) {
+            map.insert(row.0, row.1);
         }
         Ok(map)
     }

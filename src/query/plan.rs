@@ -30,6 +30,8 @@ pub struct QueryResult {
     pub node_id: u64,
     pub entities: Vec<String>,
     pub modified: Option<String>,
+    /// Path to the processed copy stored in the documents directory, if any.
+    pub stored_path: Option<String>,
 }
 
 pub fn execute_plan(
@@ -207,12 +209,19 @@ pub fn execute_plan(
     // Filter by threshold
     candidates.retain(|r| r.score >= threshold);
 
+    // Batch-fetch stored_path values for all result documents
+    let stored_paths = {
+        let paths: Vec<&str> = candidates.iter().map(|r| r.doc_path.as_str()).collect();
+        store.get_documents_stored_paths(&paths).unwrap_or_default()
+    };
+
     let results: Vec<QueryResult> = candidates.into_iter().map(|r| {
         let context = if window > 0 {
             store.get_chunk_window(r.node_id, window).unwrap_or_default()
         } else {
             String::new()
         };
+        let stored_path = stored_paths.get(&r.doc_path).cloned();
         QueryResult {
             path: r.doc_path,
             score: r.score,
@@ -223,6 +232,7 @@ pub fn execute_plan(
             node_id: r.node_id,
             entities: Vec::new(),
             modified: None,
+            stored_path,
         }
     }).collect();
 
