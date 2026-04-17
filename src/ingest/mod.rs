@@ -658,3 +658,77 @@ fn write_stored_copy(doc: &DocumentInput, documents_dir: &std::path::Path) -> Op
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yaml_quote_escapes_colons_quotes_and_newlines() {
+        // A frontmatter-breaking title: contains the three classes that
+        // would otherwise corrupt a bare YAML scalar.
+        let raw = "Rust: a \"systems\"\nlanguage";
+        let quoted = yaml_quote(raw);
+
+        // Must be double-quoted and the bad chars must be escape-encoded.
+        assert!(quoted.starts_with('"') && quoted.ends_with('"'));
+        assert!(quoted.contains("\\\""));
+        assert!(quoted.contains("\\n"));
+
+        // Full frontmatter round-trip: a YAML parser must recover the original.
+        let frontmatter = format!("title: {}\n", quoted);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&frontmatter).unwrap();
+        assert_eq!(parsed["title"].as_str(), Some(raw));
+    }
+
+    #[test]
+    fn yaml_quote_escapes_control_chars_and_backslashes() {
+        let raw = "path\\with\\backslashes\x07and\x1fctrl";
+        let quoted = yaml_quote(raw);
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&format!("v: {}\n", quoted)).unwrap();
+        assert_eq!(parsed["v"].as_str(), Some(raw));
+    }
+
+    #[test]
+    fn write_stored_copy_produces_parsable_frontmatter() {
+        // Title containing every YAML-hostile character we escape for.
+        let hostile = "Title: with \"quotes\"\nand a newline";
+        let doc = DocumentInput::new(
+            "test://hostile".to_string(),
+            hostile.to_string(),
+            "body content".to_string(),
+            ContentType::Markdown,
+            12,
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+
+        let stored = write_stored_copy(&doc, dir.path()).expect("write should succeed");
+        let written = std::fs::read_to_string(&stored).unwrap();
+
+        // Split out the frontmatter between the two --- fences.
+        let after_first = written.strip_prefix("---\n").unwrap();
+        let end = after_first.find("\n---\n").unwrap();
+        let frontmatter = &after_first[..end];
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(frontmatter)
+            .expect("frontmatter must be valid YAML even with hostile title");
+        assert_eq!(parsed["title"].as_str(), Some(hostile));
+        assert_eq!(parsed["source"].as_str(), Some("test://hostile"));
+    }
+
+    #[test]
+    fn write_stored_copy_is_idempotent_by_content_hash() {
+        // Two DocumentInputs with the same content get the same filename and
+        // the second write must not fail or double-write.
+        let dir = tempfile::tempdir().unwrap();
+        let make = |id: &str| DocumentInput::new(
+            id.to_string(), id.to_string(), "same content".to_string(),
+            ContentType::Markdown, 12, "2026-01-01T00:00:00Z".to_string(),
+        );
+        let a = write_stored_copy(&make("a"), dir.path()).unwrap();
+        let b = write_stored_copy(&make("b"), dir.path()).unwrap();
+        assert_eq!(a, b, "same content hash must map to same stored path");
+    }
+}
