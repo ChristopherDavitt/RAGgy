@@ -583,6 +583,30 @@ fn compute_hash(contents: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Escape a string as a YAML double-quoted scalar.
+///
+/// Double-quoted YAML interprets `\` and `"` as escapes and `\n`, `\t`, etc.
+/// as control chars, so we only need to escape those three classes to safely
+/// round-trip arbitrary UTF-8 — including values containing `:`, `#`, leading
+/// whitespace, or newlines that would otherwise break the frontmatter.
+fn yaml_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Write a processed copy of a document to the documents directory.
 ///
 /// Code files keep their original extension so syntax highlighting works.
@@ -617,11 +641,11 @@ fn write_stored_copy(doc: &DocumentInput, documents_dir: &std::path::Path) -> Op
     } else {
         format!(
             "---\nsource: {}\ntitle: {}\ntype: {}\ningested: {}\nmodified: {}\n---\n\n{}",
-            doc.doc_id,
-            doc.name,
-            doc.content_type.as_str(),
-            Utc::now().to_rfc3339(),
-            doc.modified,
+            yaml_quote(&doc.doc_id),
+            yaml_quote(&doc.name),
+            yaml_quote(&doc.content_type.as_str()),
+            yaml_quote(&Utc::now().to_rfc3339()),
+            yaml_quote(&doc.modified),
             doc.content,
         )
     };
