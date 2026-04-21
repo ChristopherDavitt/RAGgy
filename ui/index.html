@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAGgy — A private search engine for your documents, notes, and code</title>
+  <meta name="description" content="A local-first, MCP-native search engine for journalists, researchers, and engineers. Hybrid retrieval over your own corpus. Nothing leaves your machine." />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header class="site-header">
+    <a class="wordmark" href="#top">
+      <span class="wordmark__mark">R</span><span class="wordmark__text">AGgy</span>
+    </a>
+    <nav class="site-nav" aria-label="primary">
+      <a href="#install">Install</a>
+      <a href="#how">How it works</a>
+      <a href="#mcp">Claude Desktop</a>
+      <a href="https://github.com/ChristopherDavitt/RAGgy" rel="noopener">GitHub →</a>
+    </nav>
+  </header>
+
+  <div class="meta-strip" aria-hidden="true">
+    <span>Local&nbsp;/&nbsp;Private&nbsp;/&nbsp;Open&nbsp;source</span>
+    <span>v0.1</span>
+    <span>MIT License</span>
+    <span>Rust&nbsp;·&nbsp;SQLite&nbsp;·&nbsp;Tantivy&nbsp;·&nbsp;ONNX</span>
+    <span>For journalists, researchers, engineers, agents</span>
+  </div>
+
+  <main id="top">
+
+    <!-- HERO -->
+    <section class="hero">
+      <p class="section-label">01 &mdash; A local search engine for your own corpus</p>
+      <h1 class="display">
+        The things you&rsquo;ve read, written,<br />
+        and recorded. <em>Searchable</em> &mdash; and<br />
+        never leaving your laptop.
+      </h1>
+      <div class="hero__body">
+        <p class="lede">
+          RAGgy indexes your documents, notes, and code into a hybrid retrieval
+          engine: exact keywords, meaning, and the <em>entities</em> that
+          connect them. Ask a question in plain English. Get back the passages
+          that matter &mdash; with the people, places, and dates in those
+          passages already linked together.
+        </p>
+        <div class="hero__cta">
+          <a class="btn btn--primary" href="#install">Install</a>
+          <a class="btn btn--ghost" href="https://github.com/ChristopherDavitt/RAGgy" rel="noopener">Read the source &rarr;</a>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- PROPOSITIONS -->
+    <section class="props">
+      <p class="section-label">02 &mdash; What you get</p>
+      <div class="props__grid">
+
+        <article class="prop">
+          <p class="prop__index">i.</p>
+          <h3 class="prop__title">Hybrid retrieval,<br/>not just vectors.</h3>
+          <p class="prop__body">
+            BM25 for exact keyword matches, dense vector embeddings for meaning,
+            and an entity graph for cross-reference. Merged into one ranked
+            result. Better than grep, better than a vector DB alone.
+          </p>
+        </article>
+
+        <article class="prop">
+          <p class="prop__index">ii.</p>
+          <h3 class="prop__title">Entities, linked<br/>by the corpus itself.</h3>
+          <p class="prop__body">
+            People, organizations, dates, URLs, file paths, code identifiers
+            &mdash; extracted on ingest, deduplicated, and connected through
+            the passages they appear in. Ask <em>who is connected to whom</em>
+            and get a real answer.
+          </p>
+        </article>
+
+        <article class="prop">
+          <p class="prop__index">iii.</p>
+          <h3 class="prop__title">MCP-native.<br/>Works with Claude.</h3>
+          <p class="prop__body">
+            Drop-in Model Context Protocol server. Claude Desktop, and any
+            other MCP client, can search your corpus with zero additional
+            glue. Also exposes an HTTP API and a plain CLI.
+          </p>
+        </article>
+
+        <article class="prop">
+          <p class="prop__index">iv.</p>
+          <h3 class="prop__title">Private <em>by design</em>,<br/>not by policy.</h3>
+          <p class="prop__body">
+            Everything &mdash; index, embeddings, processed documents &mdash;
+            lives in <code>~/.raggy/</code>. No cloud. No telemetry. No
+            account. If your laptop is offline, RAGgy still works.
+          </p>
+        </article>
+
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- AUDIENCE -->
+    <section class="audience">
+      <p class="section-label">03 &mdash; Built for people who take their corpus seriously</p>
+
+      <div class="audience__layout">
+        <aside class="audience__aside">
+          <p>
+            RAGgy is a tool for working with your own material &mdash; not
+            the open web, not a team&rsquo;s shared drive, not someone
+            else&rsquo;s cloud. It's designed for the kinds of work where
+            that distinction matters.
+          </p>
+        </aside>
+
+        <ol class="audience__list">
+          <li>
+            <h4>Investigative journalists &amp; researchers</h4>
+            <p>
+              FOIA dumps. Leaked archives. Interview transcripts. Source
+              material that cannot be uploaded to a commercial service without
+              a real conversation about risk. RAGgy runs locally; the
+              documents never leave the machine they were acquired on.
+            </p>
+          </li>
+          <li>
+            <h4>Engineers with their own knowledge</h4>
+            <p>
+              Codebases, design docs, architecture notes, past decisions.
+              RAGgy indexes code with language awareness alongside prose, and
+              finds the passage that answers your question even when your
+              grep query was wrong.
+            </p>
+          </li>
+          <li>
+            <h4>AI practitioners building agents</h4>
+            <p>
+              Durable, queryable memory you control. Plug RAGgy in as an MCP
+              server and your agent gets retrieval that actually understands
+              the difference between <em>keywords</em>, <em>meaning</em>, and
+              <em>entities</em>.
+            </p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- HOW IT WORKS -->
+    <section class="how" id="how">
+      <p class="section-label">04 &mdash; How it works</p>
+
+      <h2 class="heading-2">
+        Three indexes. One answer.
+      </h2>
+
+      <div class="how__grid">
+        <div class="how__col">
+          <p class="how__tag">Full-text</p>
+          <h5>BM25 &middot; Tantivy</h5>
+          <p>
+            Rare terms, identifiers, exact phrases. The things dense vectors
+            are famously bad at.
+          </p>
+        </div>
+        <div class="how__col">
+          <p class="how__tag">Semantic</p>
+          <h5>HNSW &middot; ONNX</h5>
+          <p>
+            Meaning-based retrieval via small local embeddings. Finds
+            &ldquo;login flow&rdquo; when you searched for
+            &ldquo;authentication.&rdquo;
+          </p>
+        </div>
+        <div class="how__col">
+          <p class="how__tag">Relational</p>
+          <h5>Entity graph &middot; SQLite</h5>
+          <p>
+            Every extracted person, place, date and identifier is a node in a
+            local graph, linked through the passages they co-occur in.
+          </p>
+        </div>
+      </div>
+
+      <p class="how__narrative">
+        At query time, all three signals are blended and filtered by the
+        query&rsquo;s metadata (type, date, scope). Documents connected to
+        the entities mentioned in your query get a graph boost. Recent
+        documents can be prioritised via exponential decay with a 30-day
+        half-life. The full pipeline is documented in
+        <a href="https://github.com/ChristopherDavitt/RAGgy/blob/main/ARCHITECTURE.md">ARCHITECTURE.md</a>.
+      </p>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- INSTALL -->
+    <section class="install" id="install">
+      <p class="section-label">05 &mdash; Install</p>
+
+      <div class="install__layout">
+        <div class="install__prose">
+          <h2 class="heading-2">
+            Sixty seconds from<br />
+            <em>nothing</em> to <em>answers</em>.
+          </h2>
+          <p>
+            RAGgy is a single Rust binary. The first time you run it, it
+            creates <code>~/.raggy/</code> and downloads the small ONNX
+            models it needs (~200&nbsp;MB). After that it&rsquo;s entirely
+            offline.
+          </p>
+          <p class="muted">
+            Requires Rust 1.75+. Binary releases and a Homebrew tap are on
+            the roadmap.
+          </p>
+        </div>
+
+        <pre class="code"><code><span class="c-comment"># Clone and install</span>
+git clone https://github.com/ChristopherDavitt/RAGgy
+cd RAGgy
+cargo install --path .
+
+<span class="c-comment"># First-time setup</span>
+raggy init
+
+<span class="c-comment"># Index a folder</span>
+raggy index ~/Documents/my-project
+
+<span class="c-comment"># Ask a question</span>
+raggy query <span class="c-str">"authentication middleware"</span>
+raggy query <span class="c-str">"pdfs about climate policy from last month"</span></code></pre>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- MCP -->
+    <section class="mcp" id="mcp">
+      <p class="section-label">06 &mdash; Claude Desktop, connected</p>
+
+      <div class="mcp__layout">
+        <pre class="code code--compact"><code><span class="c-comment">// ~/Library/Application Support/Claude/claude_desktop_config.json</span>
+{
+  <span class="c-key">"mcpServers"</span>: {
+    <span class="c-key">"raggy"</span>: {
+      <span class="c-key">"command"</span>: <span class="c-str">"raggy"</span>,
+      <span class="c-key">"args"</span>: [<span class="c-str">"mcp"</span>]
+    }
+  }
+}</code></pre>
+
+        <div class="mcp__prose">
+          <h3 class="heading-3">
+            Drop it into<br/>Claude Desktop.
+          </h3>
+          <p>
+            RAGgy speaks the Model Context Protocol. Add the snippet on the
+            left to Claude&rsquo;s config, restart the app, and Claude can
+            now search your indexed corpus as a native tool &mdash; without
+            anything ever being sent to a third-party retrieval service.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <hr class="rule" />
+
+    <!-- PRINCIPLES / IN THE OPEN -->
+    <section class="principles">
+      <p class="section-label">07 &mdash; Built in the open</p>
+
+      <div class="principles__grid">
+        <div>
+          <h4>MIT Licensed</h4>
+          <p>
+            Permissive. Use it for personal work, client work, or inside a
+            product. No strings.
+          </p>
+        </div>
+        <div>
+          <h4>Single-user tool</h4>
+          <p>
+            The HTTP server is unauthenticated by design, meant for
+            <code>localhost</code>. Multi-user is a non-goal.
+          </p>
+        </div>
+        <div>
+          <h4>Pre-1.0</h4>
+          <p>
+            Indexes may need rebuilding between minor versions until we tag
+            1.0. File issues; we respond.
+          </p>
+        </div>
+        <div>
+          <h4>Contributions welcome</h4>
+          <p>
+            See <a href="https://github.com/ChristopherDavitt/RAGgy/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>.
+            Commits must be signed off under the DCO.
+          </p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="site-footer__col">
+      <p class="wordmark wordmark--footer">
+        <span class="wordmark__mark">R</span><span class="wordmark__text">AGgy</span>
+      </p>
+      <p class="muted">
+        A private, local search engine for documents, notes, and code.
+      </p>
+    </div>
+
+    <div class="site-footer__col">
+      <h6>Project</h6>
+      <ul>
+        <li><a href="https://github.com/ChristopherDavitt/RAGgy">Source</a></li>
+        <li><a href="https://github.com/ChristopherDavitt/RAGgy/blob/main/ARCHITECTURE.md">Architecture</a></li>
+        <li><a href="https://github.com/ChristopherDavitt/RAGgy/blob/main/CONTRIBUTING.md">Contributing</a></li>
+        <li><a href="https://github.com/ChristopherDavitt/RAGgy/blob/main/SECURITY.md">Security</a></li>
+      </ul>
+    </div>
+
+    <div class="site-footer__col">
+      <h6>Use</h6>
+      <ul>
+        <li><a href="#install">Install</a></li>
+        <li><a href="#mcp">Claude Desktop</a></li>
+        <li><a href="https://github.com/ChristopherDavitt/RAGgy#common-commands">CLI reference</a></li>
+      </ul>
+    </div>
+
+    <div class="site-footer__col site-footer__col--meta">
+      <p class="muted">&copy; 2026 &middot; MIT Licensed</p>
+      <p class="muted">Built in the open.</p>
+    </div>
+  </footer>
+
+</body>
+</html>
