@@ -66,6 +66,15 @@ base64 = "0.22"
 # Signal handling
 ctrlc = "3"
 
+# Init / model download
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+indicatif = "0.17"
+dirs = "5"
+
+# File watching
+notify = "6"
+notify-debouncer-mini = "0.3"
+
 # Error handling
 anyhow = "1"
 thiserror = "1"

@@ -15,6 +15,7 @@ impl GraphStore {
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         let store = GraphStore { conn };
         store.create_tables()?;
+        store.migrate()?;
         Ok(store)
     }
 
@@ -28,7 +29,8 @@ impl GraphStore {
                 modified TEXT NOT NULL,
                 size INTEGER NOT NULL,
                 content_hash TEXT NOT NULL,
-                indexed_at TEXT NOT NULL
+                indexed_at TEXT NOT NULL,
+                stored_path TEXT
             );
 
             CREATE TABLE IF NOT EXISTS nodes (
@@ -108,6 +110,16 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Idempotent schema migrations for existing databases.
+    fn migrate(&self) -> Result<()> {
+        // Add stored_path column if it didn't exist before this version.
+        // SQLite returns an error if the column already exists; we ignore it.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE documents ADD COLUMN stored_path TEXT;"
+        );
+        Ok(())
+    }
+
     pub fn next_id(&self) -> Result<u64> {
         let max_id: Option<u64> = self.conn.query_row(
             "SELECT MAX(id) FROM nodes",
@@ -145,11 +157,13 @@ impl GraphStore {
         size: u64,
         content_hash: &str,
         indexed_at: &str,
+        stored_path: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO documents (node_id, path, content_type, title, modified, size, content_hash, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![node_id, path, content_type, title, modified, size, content_hash, indexed_at],
+            "INSERT OR REPLACE INTO documents \
+             (node_id, path, content_type, title, modified, size, content_hash, indexed_at, stored_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![node_id, path, content_type, title, modified, size, content_hash, indexed_at, stored_path],
         )?;
         Ok(())
     }
@@ -417,6 +431,58 @@ impl GraphStore {
         }
     }
 
+    /// Batch-fetch modified timestamps for a set of document paths.
+    /// Returns a map of path → DateTime<Utc>.  Paths not found are absent.
+    pub fn get_documents_modified(
+        &self,
+        paths: &[&str],
+    ) -> Result<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>> {
+        if paths.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders: Vec<String> = (1..=paths.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT path, modified FROM documents WHERE path IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt.query_map(rusqlite::params_from_iter(paths.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows.filter_map(|r| r.ok()) {
+            let (path, modified_str) = row;
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&modified_str) {
+                map.insert(path, dt.with_timezone(&chrono::Utc));
+            }
+        }
+        Ok(map)
+    }
+
+    /// Batch-fetch stored_path values for a set of document paths.
+    pub fn get_documents_stored_paths(
+        &self,
+        paths: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if paths.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders: Vec<String> = (1..=paths.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT path, stored_path FROM documents WHERE path IN ({}) AND stored_path IS NOT NULL",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt.query_map(rusqlite::params_from_iter(paths.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows.filter_map(|r| r.ok()) {
+            map.insert(row.0, row.1);
+        }
+        Ok(map)
+    }
+
     pub fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -508,6 +574,63 @@ impl GraphStore {
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    /// Fetch a context window around a matched chunk.
+    ///
+    /// Walks up to the chunk's immediate parent (section or document) via a
+    /// `contains` edge, retrieves all sibling chunks ordered by node_id
+    /// (insertion order == document order), and returns the concatenated text
+    /// of the `window` chunks before and after the matched chunk.
+    ///
+    /// A `window` of 1 returns [prev, matched, next]; 0 returns just the
+    /// matched chunk's own text.  The result is always clamped to the
+    /// boundaries of the parent node — the window never crosses section or
+    /// document edges.
+    pub fn get_chunk_window(&self, chunk_id: u64, window: usize) -> Result<String> {
+        // Find the immediate parent that contains this chunk
+        let parent_id: Option<u64> = self.conn.query_row(
+            "SELECT from_node FROM edges WHERE to_node = ?1 AND kind = 'contains' LIMIT 1",
+            params![chunk_id],
+            |row| row.get(0),
+        ).ok();
+
+        let parent_id = match parent_id {
+            Some(id) => id,
+            None => return Ok(String::new()),
+        };
+
+        // Fetch all chunks under the same parent, ordered by node_id.
+        // json_extract pulls the text field out of the JSON properties blob.
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, COALESCE(json_extract(n.properties, '$.text'), '')
+             FROM edges e
+             JOIN nodes n ON n.id = e.to_node
+             WHERE e.from_node = ?1
+               AND e.kind = 'contains'
+               AND n.kind = 'chunk'
+             ORDER BY n.id ASC"
+        )?;
+        let siblings: Vec<(u64, String)> = stmt
+            .query_map(params![parent_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let pos = match siblings.iter().position(|(id, _)| *id == chunk_id) {
+            Some(p) => p,
+            None => return Ok(String::new()),
+        };
+
+        let start = pos.saturating_sub(window);
+        let end = (pos + window + 1).min(siblings.len());
+
+        let context = siblings[start..end]
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        Ok(context)
     }
 
     /// Find NER entities by name (partial match). Excludes aliases.

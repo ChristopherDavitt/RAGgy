@@ -85,8 +85,9 @@ pub fn ingest_paths(
     vector: Option<&mut VectorIndex>,
     ner: Option<&mut GlinerModel>,
     config: &Config,
+    documents_dir: Option<&std::path::Path>,
 ) -> Result<IngestResult> {
-    ingest_paths_with_progress(paths, exclude, store, fulltext, vector, ner, config, None)
+    ingest_paths_with_progress(paths, exclude, store, fulltext, vector, ner, config, None, documents_dir)
 }
 
 /// Walk local directories with progress reporting.
@@ -99,6 +100,7 @@ pub fn ingest_paths_with_progress(
     mut ner: Option<&mut GlinerModel>,
     config: &Config,
     mut progress: Option<ProgressFn>,
+    documents_dir: Option<&std::path::Path>,
 ) -> Result<IngestResult> {
     let mut result = IngestResult {
         files_indexed: 0,
@@ -187,6 +189,7 @@ pub fn ingest_paths_with_progress(
                 &doc, store, fulltext, vector.as_deref_mut(), ner.as_deref_mut(),
                 config, &mut next_id, &mut progress,
                 result.files_indexed + result.files_skipped + result.files_failed + 1,
+                documents_dir,
             )?;
 
             match doc_result {
@@ -256,6 +259,7 @@ fn ingest_document(
     next_id: &mut u64,
     progress: &mut Option<ProgressFn>,
     file_num: u64,
+    documents_dir: Option<&std::path::Path>,
 ) -> Result<DocOutcome> {
     // Check if unchanged
     if let Ok(Some(existing_hash)) = store.get_document_hash(&doc.doc_id) {
@@ -448,6 +452,9 @@ fn ingest_document(
         }
     }
 
+    // Write a processed copy of the document to the documents_dir
+    let stored_path = documents_dir.and_then(|dir| write_stored_copy(doc, dir));
+
     // Store document metadata
     let doc_node_id = nodes.first().map(|n| n.id).unwrap_or(0);
     store.insert_document(
@@ -459,6 +466,7 @@ fn ingest_document(
         doc.size,
         &doc.content_hash,
         &Utc::now().to_rfc3339(),
+        stored_path.as_deref(),
     )?;
 
     if let Some(ref mut cb) = progress {
@@ -499,6 +507,7 @@ pub fn ingest_documents(
             doc, store, fulltext, vector.as_deref_mut(), ner.as_deref_mut(),
             config, &mut next_id, &mut progress,
             (i + 1) as u64,
+            None, // HTTP-uploaded documents are not stored to disk
         )?;
 
         match doc_result {
@@ -572,4 +581,56 @@ fn compute_hash(contents: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(contents);
     format!("{:x}", hasher.finalize())
+}
+
+/// Write a processed copy of a document to the documents directory.
+///
+/// Code files keep their original extension so syntax highlighting works.
+/// All other content types are stored as `.md` with YAML frontmatter so
+/// a frontend or Obsidian vault can render them directly.
+///
+/// Returns the absolute path of the stored file, or None on failure.
+fn write_stored_copy(doc: &DocumentInput, documents_dir: &std::path::Path) -> Option<String> {
+    let hash_prefix = &doc.content_hash[..16];
+
+    let is_code = matches!(&doc.content_type, ContentType::Code { .. });
+
+    let ext = if is_code {
+        std::path::Path::new(&doc.doc_id)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("txt")
+            .to_string()
+    } else {
+        "md".to_string()
+    };
+
+    let dest = documents_dir.join(format!("{}.{}", hash_prefix, ext));
+
+    // Same content → same hash → same dest: skip if already written
+    if dest.exists() {
+        return Some(dest.to_string_lossy().into_owned());
+    }
+
+    let body = if is_code {
+        doc.content.clone()
+    } else {
+        format!(
+            "---\nsource: {}\ntitle: {}\ntype: {}\ningested: {}\nmodified: {}\n---\n\n{}",
+            doc.doc_id,
+            doc.name,
+            doc.content_type.as_str(),
+            Utc::now().to_rfc3339(),
+            doc.modified,
+            doc.content,
+        )
+    };
+
+    match std::fs::write(&dest, &body) {
+        Ok(_) => Some(dest.to_string_lossy().into_owned()),
+        Err(e) => {
+            eprintln!("Warning: could not write stored copy for {}: {}", doc.doc_id, e);
+            None
+        }
+    }
 }

@@ -19,6 +19,10 @@ use raggy::workspace::Workspace;
 #[derive(Parser)]
 #[command(name = "raggy", about = "Structured search engine for AI agents")]
 struct Cli {
+    /// RAGgy home directory (default: ~/.raggy or $RAGGY_HOME)
+    #[arg(long, global = true)]
+    home: Option<String>,
+
     /// Database to use (overrides default)
     #[arg(long, global = true)]
     db: Option<String>,
@@ -75,6 +79,27 @@ enum Commands {
         /// Filter by tag
         #[arg(long)]
         tag: Option<String>,
+
+        /// Number of sibling chunks to include before and after each matched
+        /// chunk for context. 0 = matched chunk only, 1 = ±1 chunk (default),
+        /// 2 = ±2 chunks, etc.
+        #[arg(long, default_value = "1")]
+        window: usize,
+
+        /// Only return documents modified on or after this date (YYYY-MM-DD or YYYY-MM).
+        /// Overrides any date expression in the query text.
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Only return documents modified on or before this date (YYYY-MM-DD or YYYY-MM).
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Boost recently modified documents.  Uses exponential decay with a
+        /// 30-day half-life — documents modified today score ~40% higher than
+        /// identical content from months ago.
+        #[arg(long)]
+        recent: bool,
     },
 
     /// Show index statistics
@@ -131,11 +156,27 @@ enum Commands {
         port: u16,
     },
 
+    /// Start MCP (Model Context Protocol) server on stdio.
+    /// Add to Claude Desktop via: {"command":"raggy","args":["mcp"]}
+    Mcp,
+
+    /// Watch directories and incrementally reindex on file changes.
+    /// Ideal for keeping the index in sync with a live memory directory
+    /// (e.g. ~/.openclaw/memory/) without manual reindexing.
+    Watch {
+        /// Directories to watch (defaults to current directory)
+        paths: Vec<PathBuf>,
+    },
+
     /// Manage databases
     Db {
         #[command(subcommand)]
         action: DbAction,
     },
+
+    /// Initialize RAGgy: create home directory and download required models.
+    /// Run this once after installing raggy.
+    Init,
 }
 
 #[derive(Subcommand)]
@@ -167,14 +208,22 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    let home_path = cli.home.as_deref().map(Path::new);
+
     match cli.command {
-        Commands::Db { action } => cmd_db(action, cli.db.as_deref()),
+        Commands::Init => {
+            let home = home_path
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(raggy::workspace::default_home);
+            raggy::init::run(&home)
+        }
+        Commands::Db { action } => cmd_db(action, home_path, cli.db.as_deref()),
         _ => {
-            let ws = Workspace::resolve(cli.db.as_deref())?;
+            let ws = Workspace::resolve(home_path, cli.db.as_deref())?;
             match cli.command {
                 Commands::Index { paths, exclude, tag, meta } => cmd_index(paths, exclude, tag, meta, &ws),
-                Commands::Query { query, format, limit, threshold, alpha, no_vectors, tag } => {
-                    cmd_query(&query, format, limit, threshold, alpha, no_vectors, tag.as_deref(), &ws)
+                Commands::Query { query, format, limit, threshold, alpha, no_vectors, tag, window, from, to, recent } => {
+                    cmd_query(&query, format, limit, threshold, alpha, no_vectors, tag.as_deref(), window, from.as_deref(), to.as_deref(), recent, &ws)
                 }
                 Commands::Status => cmd_status(&ws),
                 Commands::Reindex { full } => cmd_reindex(full, &ws),
@@ -182,7 +231,9 @@ fn main() -> Result<()> {
                 Commands::Graph { entity, limit, format } => cmd_graph(&entity, limit, format, &ws),
                 Commands::Connect { from, to, depth, format } => cmd_connect(&from, &to, depth, format, &ws),
                 Commands::Serve { port } => raggy::serve::start_server(port, ws),
-                Commands::Db { .. } => unreachable!(),
+                Commands::Mcp => raggy::mcp::run(&ws),
+                Commands::Watch { paths } => raggy::watch::run(&paths, &ws),
+                Commands::Db { .. } | Commands::Init => unreachable!(),
             }
         }
     }
@@ -311,8 +362,10 @@ fn cmd_index(paths: Vec<PathBuf>, exclude: Vec<String>, tags: Vec<String>, meta:
         }
     });
 
+    ws.ensure_dirs()?; // ensures documents_dir exists
     let result = ingest::ingest_paths_with_progress(
         &paths, &exclude, &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config, Some(progress),
+        Some(&ws.documents_dir()),
     )?;
 
     // Apply tags and metadata to newly indexed documents
@@ -355,6 +408,10 @@ fn cmd_query(
     alpha: Option<f32>,
     no_vectors: bool,
     tag_filter: Option<&str>,
+    window: usize,
+    from: Option<&str>,
+    to: Option<&str>,
+    recent: bool,
     ws: &Workspace,
 ) -> Result<()> {
     if !ws.exists() {
@@ -378,14 +435,22 @@ fn cmd_query(
 
     let start = Instant::now();
 
-    let query_plan = parser::parse_query(query);
+    let mut query_plan = parser::parse_query(query);
+
+    // Explicit --from / --to override any date expression found in the query text.
+    if from.is_some() || to.is_some() {
+        query_plan.date_filter = Some(parser::DateRange {
+            after:  from.and_then(parse_date_arg),
+            before: to.and_then(parse_date_arg),
+        });
+    }
 
     let alpha = alpha.unwrap_or_else(|| {
         query_plan.suggested_alpha.unwrap_or(config.embedding.alpha)
     });
 
     let mut results = plan::execute_plan(
-        &query_plan, &fulltext, vector.as_mut(), &store, limit, threshold, alpha,
+        &query_plan, &fulltext, vector.as_mut(), &store, limit, threshold, alpha, window, recent,
     )?;
 
     // Filter by tag if specified
@@ -428,9 +493,16 @@ fn cmd_query(
                     result.content_type.dimmed(),
                     tag_str.magenta(),
                 );
+
+                // Show context window if available, otherwise fall back to snippet
+                let display_text = if !result.context.is_empty() {
+                    &result.context
+                } else {
+                    &result.snippet
+                };
                 println!(
                     "     \"{}\"",
-                    truncate_snippet(&result.snippet, 200).dimmed(),
+                    truncate_snippet(display_text, 400).dimmed(),
                 );
                 println!();
             }
@@ -448,8 +520,11 @@ fn cmd_query(
                     "content_type": r.content_type,
                     "title": r.title,
                     "snippet": r.snippet,
+                    "context": r.context,
+                    "node_id": r.node_id,
                     "entities": r.entities,
                     "modified": r.modified,
+                    "stored_path": r.stored_path,
                     "tags": tags,
                     "metadata": meta_obj,
                 })
@@ -589,7 +664,7 @@ fn cmd_reindex(full: bool, ws: &Workspace) -> Result<()> {
         }
 
         let start = Instant::now();
-        let result = ingest::ingest_paths(&dirs, &[], &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config)?;
+        let result = ingest::ingest_paths(&dirs, &[], &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config, Some(&ws.documents_dir()))?;
         let elapsed = start.elapsed();
 
         println!(
@@ -629,7 +704,7 @@ fn cmd_reindex(full: bool, ws: &Workspace) -> Result<()> {
             }
         }
 
-        let result = ingest::ingest_paths(&dirs, &[], &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config)?;
+        let result = ingest::ingest_paths(&dirs, &[], &store, &fulltext, vector.as_mut(), ner_model.as_mut(), &config, Some(&ws.documents_dir()))?;
         let elapsed = start.elapsed();
 
         println!(
@@ -884,9 +959,8 @@ fn cmd_connect(from: &str, to: &str, max_depth: usize, format: OutputFormat, ws:
     Ok(())
 }
 
-fn cmd_db(action: DbAction, db_override: Option<&str>) -> Result<()> {
-    // For db commands, we need the raggy_dir but not necessarily a resolved database
-    let ws = Workspace::resolve(db_override)?;
+fn cmd_db(action: DbAction, home_override: Option<&Path>, db_override: Option<&str>) -> Result<()> {
+    let ws = Workspace::resolve(home_override, db_override)?;
 
     match action {
         DbAction::List => {
@@ -1003,6 +1077,26 @@ fn cmd_db(action: DbAction, db_override: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse a CLI date argument into a UTC DateTime.
+/// Accepts: YYYY-MM-DD, YYYY-MM (start of month), YYYY (start of year).
+fn parse_date_arg(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveDate, TimeZone, Utc};
+    let s = s.trim();
+    // YYYY-MM-DD
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
+    }
+    // YYYY-MM
+    if let Ok(d) = NaiveDate::parse_from_str(&format!("{}-01", s), "%Y-%m-%d") {
+        return Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
+    }
+    // YYYY
+    if let Ok(d) = NaiveDate::parse_from_str(&format!("{}-01-01", s), "%Y-%m-%d") {
+        return Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
+    }
+    None
 }
 
 fn truncate_snippet(s: &str, max_len: usize) -> String {

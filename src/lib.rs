@@ -1,12 +1,15 @@
 pub mod config;
+pub mod init;
 pub mod entity;
 pub mod extractors;
 pub mod graph;
 pub mod index;
 pub mod ingest;
+pub mod mcp;
 pub mod query;
 pub mod retrieval;
 pub mod serve;
+pub mod watch;
 pub mod workspace;
 
 #[derive(thiserror::Error, Debug)]
