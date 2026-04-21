@@ -294,6 +294,7 @@ fn tool_search(
         if !r.title.is_empty() {
             text.push_str(&format!("  |  Title: {}", r.title));
         }
+        text.push_str("\n");
         if let Some(ref sp) = r.stored_path {
             text.push_str(&format!("File: {}\n", sp));
         }

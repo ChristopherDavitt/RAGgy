@@ -1,274 +1,177 @@
-# raggy
+# RAGgy
 
-A structured search engine CLI tool for AI agents. Indexes local files using deterministic methods (no LLM required) and exposes natural language queries that decompose into multi-signal structured retrieval.
+**A private, local search engine for your documents, notes, and code.** Point it at a folder, ask a question, get back the passages that matter — with the people, places, and dates in those passages linked together. Nothing leaves your machine.
 
-## Features
+RAGgy is built for anyone who works with a personal corpus and needs better than grep: investigative journalists working through FOIA dumps and interview transcripts, researchers cross-referencing sources, engineers searching their own codebase, and AI agents that need durable memory they can trust.
 
-- **BM25 full-text search** powered by Tantivy (Rust-native Lucene equivalent)
-- **Entity graph** with regex-based extraction (URLs, emails, file paths, dates, versions, code identifiers)
-- **Graph-boosted ranking** — documents connected to query entities get boosted in results
-- **Query planner** with support for negation, type filtering, scope filtering, and date ranges
-- **Incremental indexing** — SHA-256 content hashing skips unchanged files on reindex
-- **Multi-format support** — Markdown, plain text, code (Rust, Python, JS/TS, Go, Solidity), JSON, YAML, TOML
-- **JSON output mode** for programmatic consumption by AI agents
-- **SQLite-backed graph** for document relationships, entities, and metadata
-- **Respects .gitignore** via the `ignore` crate
+---
+
+## What you get
+
+- **Ask questions in plain English.** "deployment strategies not kubernetes", "reports modified this month", "emails between A and B in 2024".
+- **Hybrid retrieval.** Exact keyword matches (BM25), meaning-based matches (vector embeddings), and entity-graph matches — combined into a single ranked result.
+- **Entities, linked.** People, organizations, dates, URLs, file paths, and code identifiers are extracted on ingest, deduplicated, and connected. Ask "who is connected to Acme Corp?" and get a real answer.
+- **Works with any frontier model.** Runs as an MCP server for Claude Desktop out of the box. Also exposes an HTTP API for custom clients. You can also use it standalone as a CLI.
+- **Private by design.** Everything — index, embeddings, documents — lives in `~/.raggy/`. No cloud, no telemetry, no account.
+
+## Who this is for
+
+- **Journalists and researchers** working with sensitive source material who can't upload to a cloud service.
+- **Engineers** who want better search over their own codebase and notes than `grep` and fuzzy file finders.
+- **AI practitioners** building agents that need persistent, queryable memory of documents, conversations, and artifacts.
 
 ## Install
 
-Requires [Rust](https://rustup.rs/) 1.75+.
+RAGgy is currently installed from source. Binary releases are on the roadmap.
 
 ```bash
-git clone <repo-url>
-cd raggy
-cargo build --release
+# Requires Rust 1.75+  (https://rustup.rs)
+git clone https://github.com/ChristopherDavitt/RAGgy
+cd RAGgy
+cargo install --path .
+
+# First-time setup: creates ~/.raggy/ and downloads the embedding + NER models (~200 MB)
+raggy init
 ```
 
-The binary is at `target/release/raggy`. Add it to your PATH:
+After `raggy init` finishes, you're ready to index and query.
+
+## 60-second hello world
 
 ```bash
-# Windows
-setx PATH "%PATH%;C:\path\to\raggy\target\release"
+# Index a folder of documents, code, or notes
+raggy index ~/Documents/my-project
 
-# macOS / Linux
-export PATH="$PATH:/path/to/raggy/target/release"
-```
-
-## Quick Start
-
-```bash
-# Index a directory
-raggy index ~/my-project
-
-# Search
+# Ask a question
 raggy query "authentication middleware"
 
-# Check what's indexed
-raggy status
+# Or in plain English
+raggy query "pdfs about climate policy from last month"
 ```
 
-## Usage
+That's it. Results come back ranked by a mix of keyword, semantic, and entity-graph signals.
 
-### Index files
+> **A GIF demo will live here.** If you're seeing the raw repo, you can record one yourself with a real query and open a PR — see `CONTRIBUTING.md`.
 
-```bash
-# Index one or more directories
-raggy index ~/projects/api ~/docs
+## Use it with Claude Desktop (MCP)
 
-# Exclude patterns
-raggy index ~/projects --exclude "*.log" --exclude "vendor"
-```
+RAGgy speaks the Model Context Protocol, so Claude Desktop can search your corpus directly.
 
-Supported file types:
-
-| Extension | Type |
-|---|---|
-| `.md`, `.mdx` | Markdown |
-| `.txt`, `.text` | Plain text |
-| `.rs`, `.js`, `.ts`, `.py`, `.go`, `.sol` | Code |
-| `.json` | JSON |
-| `.yaml`, `.yml` | YAML |
-| `.toml` | TOML |
-
-### Search
-
-```bash
-# Basic keyword search
-raggy query "deployment strategies"
-
-# Negation — exclude results containing certain terms
-raggy query "deployment not kubernetes"
-
-# Type filtering
-raggy query "blog post about testing"
-
-# Scope to a directory
-raggy query "error handling in ~/projects/api"
-
-# Date filtering
-raggy query "config files modified this week"
-
-# JSON output (for AI agents)
-raggy query "auth" --format json
-
-# Limit results and set minimum score
-raggy query "database" --limit 5 --threshold 0.5
-```
-
-### JSON Output
-
-The `--format json` flag returns structured output suitable for AI agent consumption:
+Add this to your Claude Desktop MCP config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
 ```json
 {
-  "query": "deployment strategies",
-  "plan": {
-    "keywords": ["deployment", "strategies"],
-    "negations": [],
-    "type_filter": null,
-    "scope_filter": null,
-    "entities": [],
-    "confidence": 0.7
-  },
-  "results": [
-    {
-      "path": "/home/user/docs/deployment.md",
-      "score": 3.65,
-      "content_type": "markdown",
-      "title": "Deployment Strategies",
-      "snippet": "When choosing a deployment strategy...",
-      "entities": [],
-      "modified": null
+  "mcpServers": {
+    "raggy": {
+      "command": "raggy",
+      "args": ["mcp"]
     }
-  ],
-  "meta": {
-    "elapsed_ms": 35,
-    "total_candidates": 2,
-    "index_version": "0.1.0"
   }
 }
 ```
 
-### Status
+Restart Claude Desktop and ask it to search your indexed corpus.
+
+## Use it over HTTP
 
 ```bash
-raggy status
+raggy serve --port 3000
 ```
 
-```
-raggy index status
-  Documents:    42
-  Nodes:        387
-  Edges:        512
-  Entities:     96
-  Last indexed: 2026-03-15T18:08:43Z
-
-  Content types:
-    markdown: 15
-    code:python: 12
-    code:rust: 8
-    yaml: 4
-    plaintext: 3
-
-  Index size:   1.2 MB
-```
-
-### Reindex
+Then:
 
 ```bash
-# Incremental — only reprocesses changed/new/deleted files
-raggy reindex
-
-# Full rebuild
-raggy reindex --full
+curl -X POST http://localhost:3000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "deployment strategies", "limit": 5}'
 ```
 
-### Configuration
+## Common commands
 
 ```bash
-# View all config
-raggy config
-
-# Get a value
-raggy config query.default_limit
-
-# Set a value
-raggy config query.default_limit 20
+raggy index <paths>...           # ingest files or directories
+raggy query "<question>"         # search
+raggy watch <paths>...           # live-index a folder as it changes
+raggy reindex                    # update the index (incremental by default)
+raggy status                     # show counts and index size
+raggy graph <entity>             # show entities connected to a given entity
+raggy connect <from> <to>        # find the shortest link between two entities
+raggy db list | create | delete  # manage independent databases
+raggy serve                      # start the HTTP server
+raggy mcp                        # start an MCP server on stdio
 ```
 
-Config is stored in `.raggy/config.toml`:
+Run `raggy <cmd> --help` for full options.
 
-```toml
-[index]
-exclude_patterns = ["node_modules", ".git", "target", "__pycache__", ".raggy"]
+## What it can index
 
-[query]
-default_format = "human"
-default_limit = 10
+| Extension | Type | Notes |
+| --- | --- | --- |
+| `.md`, `.mdx` | Markdown | Heading structure preserved as sections |
+| `.txt`, `.text`, `.log` | Plain text | |
+| `.pdf` | PDF | Text extraction via `pdf-extract` |
+| `.html`, `.htm` | HTML | |
+| `.csv`, `.tsv` | Tabular | |
+| `.rs`, `.js`, `.ts`, `.py`, `.go`, `.sol` | Code | Split by top-level definitions |
+| `.json`, `.yaml`, `.yml`, `.toml` | Structured | |
 
-[llm]
-enabled = false
+RAGgy respects `.gitignore` via the `ignore` crate.
+
+## Query language
+
+Plain English works, but you can also use these operators explicitly:
+
+```bash
+raggy query "deployment not kubernetes"              # negation
+raggy query "markdown files about testing"           # type filter
+raggy query "error handling in ~/projects/api"       # scope filter
+raggy query "reports modified this week"             # date filter
+raggy query "climate --from 2024-01 --to 2024-06"    # explicit date range
+raggy query "climate --recent"                       # boost recent docs
+raggy query "auth" --no-vectors                      # keyword-only
+raggy query "auth" --alpha 0.8                       # favor semantic over keyword
+raggy query "auth" --format json                     # structured output
 ```
 
-## How It Works
+## How it works, briefly
 
-### Indexing Pipeline
+RAGgy maintains three views of your corpus and blends them at query time:
 
-1. Walk directory tree (respecting `.gitignore`)
-2. Compute SHA-256 hash per file — skip unchanged files
-3. Select extractor based on file extension
-4. Extract document graph: **Document** -> **Section** -> **Chunk** nodes with edges
-5. Run regex entity extractors on chunk text (URLs, emails, dates, identifiers, etc.)
-6. Build co-occurrence edges between entities in the same chunk
-7. Index text content in Tantivy for BM25 search
-8. Store graph + metadata in SQLite
+1. **A full-text index** (Tantivy, BM25) for exact and near-exact matches.
+2. **A vector index** (HNSW over `all-MiniLM-L6-v2` ONNX embeddings) for meaning-based matches.
+3. **An entity graph** (SQLite) where extracted entities — people, organizations, dates, identifiers — are nodes connected through the documents they appear in.
 
-### Query Pipeline
+A query hits all three, scores are merged, and the graph boosts documents that mention entities referenced in the query. See **[ARCHITECTURE.md](./ARCHITECTURE.md)** for the full story.
 
-1. Parse query into a **QueryPlan** (keywords, negations, type/scope/date filters, entities)
-2. Run BM25 search via Tantivy
-3. Apply metadata filters (type, scope, date)
-4. Graph boost — entities found in query text boost connected documents
-5. Negation exclusion — remove documents matching negated terms
-6. Rank and return results
-
-### Architecture
+## File layout
 
 ```
-raggy/
-├── src/
-│   ├── main.rs              # CLI entry point (clap)
-│   ├── lib.rs               # Public API re-exports
-│   ├── config.rs            # Configuration loading/saving
-│   ├── ingest/
-│   │   ├── mod.rs           # Ingestion orchestrator
-│   │   ├── markdown.rs      # Markdown extractor (pulldown-cmark)
-│   │   ├── plaintext.rs     # Plain text extractor
-│   │   ├── code.rs          # Code extractor
-│   │   └── structured.rs    # JSON/YAML/TOML extractor
-│   ├── entity/
-│   │   ├── mod.rs           # Entity extraction orchestrator
-│   │   └── regex.rs         # Pattern-based entity extractors
-│   ├── graph/
-│   │   ├── mod.rs           # Core data types (Node, Edge, etc.)
-│   │   ├── store.rs         # SQLite persistence
-│   │   └── traverse.rs      # Graph query operations
-│   ├── index/
-│   │   ├── mod.rs           # Index manager
-│   │   ├── fulltext.rs      # Tantivy full-text index
-│   │   ├── metadata.rs      # SQLite metadata queries
-│   │   └── tfidf.rs         # TF-IDF (reserved)
-│   ├── query/
-│   │   ├── mod.rs           # Query module
-│   │   ├── parser.rs        # Deterministic query decomposition
-│   │   └── plan.rs          # QueryPlan execution
-│   └── retrieval/
-│       ├── mod.rs           # Retrieval module
-│       └── ranker.rs        # Multi-signal ranking (reserved)
-└── .raggy/                  # Created at index root
-    ├── config.toml
-    ├── tantivy/             # Full-text index files
-    └── raggy.db             # SQLite graph + metadata
+~/.raggy/
+├── raggy.toml                # global config (default db, etc.)
+├── models/                   # ONNX embedding + NER models (shared)
+└── dbs/
+    └── default/
+        ├── config.toml       # per-database config
+        ├── raggy.db          # SQLite: graph + metadata
+        ├── tantivy/          # full-text index
+        ├── vectors/          # HNSW vector index
+        └── documents/        # processed copies of ingested files
 ```
 
-## Performance
+Override the home directory with `--home <path>` or `$RAGGY_HOME`.
 
-| Operation | Target |
-|---|---|
-| Index 1,000 files | < 10s |
-| Index 10,000 files | < 60s |
-| Query | < 100ms p95 |
-| Incremental reindex (10 changed files) | < 2s |
+## Status and stability
 
-## Tech Stack
+RAGgy is **pre-1.0** and under active development. Indexes may need rebuilding across minor versions until we tag 1.0. If you hit a bug, please open an issue with the output of `raggy status` and the steps to reproduce.
 
-- **Rust** — systems language for performance
-- **Tantivy** — full-text search with BM25 scoring
-- **SQLite** (rusqlite) — graph and metadata storage with WAL mode
-- **pulldown-cmark** — Markdown parsing
-- **clap** — CLI argument parsing
-- **serde** — serialization for JSON/YAML/TOML
+## Contributing
+
+Contributions are welcome — see **[CONTRIBUTING.md](./CONTRIBUTING.md)**. All commits must be signed off under the [Developer Certificate of Origin](./CONTRIBUTING.md#developer-certificate-of-origin).
+
+## Security
+
+To report a security vulnerability, please see **[SECURITY.md](./SECURITY.md)**. Do not open a public issue.
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).
